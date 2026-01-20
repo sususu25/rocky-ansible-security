@@ -1,0 +1,4 @@
+*.pem
+*.key
+inventory/hosts.ini
+ansible.cfg

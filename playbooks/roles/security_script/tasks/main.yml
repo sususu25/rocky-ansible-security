@@ -1,0 +1,23 @@
+- name: Create target directory
+  file:
+    path: /opt/security
+    state: directory
+    mode: '0755'
+
+- name: Copy run_all.sh
+  copy:
+    src: run_all.sh
+    dest: /opt/security/run_all.sh
+    mode: '0755'
+
+- name: Copy fixes directory
+  copy:
+    src: fixes/
+    dest: /opt/security/fixes/
+    mode: '0755'
+
+- name: Run security script
+  shell: |
+    cd /opt/security
+    ./run_all.sh
+  become: true

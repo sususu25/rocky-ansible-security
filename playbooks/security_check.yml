@@ -1,0 +1,7 @@
+---
+- name: Rocky Linux Security Check & Fix
+  hosts: rocky_servers
+  become: true
+
+  roles:
+    - security_script
