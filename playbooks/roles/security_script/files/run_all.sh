@@ -3,7 +3,7 @@
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 FIX_DIR="$BASE_DIR/fixes"
 LOG_DIR="$BASE_DIR/logs"
-LOG_FILE="$LOG_DIR/vuln_fix_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="$LOG_DIR/vuln_fix_$(date +%Y%m%d_%H%M%S)_$$.log"
 
 mkdir -p "$LOG_DIR"
 

@@ -2,3 +2,6 @@
 *.key
 inventory/hosts.ini
 ansible.cfg
+
+collected_logs/
+*.log

@@ -1,0 +1,10 @@
+---
+- name: Rocky Linux Security Audit only
+  hosts: rocky_servers
+  become: true
+
+  tasks:
+    - name: Run audit scenario via security_script role
+      import_role:
+        name: security_script
+        tasks_from: audit

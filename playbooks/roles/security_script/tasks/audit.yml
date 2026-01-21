@@ -1,0 +1,48 @@
+# roles/security_script/tasks/audit.yml
+# 오딧(Audit) 시나리오
+
+- name: Create base directory for security scripts
+  file:
+    path: /opt/security
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create log directory
+  file:
+    path: /opt/security/logs
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Copy audit script
+  copy:
+    src: run_audit.sh              # roles/security_script/files/run_audit.sh
+    dest: /opt/security/run_audit.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Run audit script
+  shell: |
+    cd /opt/security
+    ./run_audit.sh
+  register: audit_result
+
+# 🔎 1단계: 원격 서버에서 audit 로그 파일 목록 찾기
+- name: Find audit log files
+  find:
+    paths: /opt/security/logs
+    patterns: "vuln_audit_*.log"
+    file_type: file
+  register: audit_logs
+
+# 📥 2단계: 찾은 파일들을 컨트롤 노드로 가져오기
+- name: Fetch audit logs to control node
+  fetch:
+    src: "{{ item.path }}"
+    dest: "./collected_logs/{{ inventory_hostname }}/"
+    flat: yes
+  loop: "{{ audit_logs.files | default([]) }}"

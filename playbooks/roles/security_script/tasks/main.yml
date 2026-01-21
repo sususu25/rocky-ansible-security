@@ -1,23 +1,48 @@
-- name: Create target directory
+# roles/security_script/tasks/main.yml
+# 조치(enforce) 시나리오
+
+- name: Create base directory for security scripts
   file:
     path: /opt/security
     state: directory
+    owner: root
+    group: root
     mode: '0755'
 
 - name: Copy run_all.sh
   copy:
-    src: run_all.sh
+    src: run_all.sh          # roles/security_script/files/run_all.sh 를 자동으로 찾음
     dest: /opt/security/run_all.sh
+    owner: root
+    group: root
     mode: '0755'
 
 - name: Copy fixes directory
   copy:
-    src: fixes/
+    src: fixes/              # roles/security_script/files/fixes/ 를 자동으로 찾음
     dest: /opt/security/fixes/
+    owner: root
+    group: root
     mode: '0755'
 
 - name: Run security script
   shell: |
     cd /opt/security
     ./run_all.sh
-  become: true
+
+# 🔎 1단계: 원격 서버에서 audit 로그 파일 목록 찾기
+- name: Find audit log files
+  find:
+    paths: /opt/security/logs
+    patterns: "vuln_fix_*.log"           # 또는 "*.log" 로 전체 가져와도 됨
+    file_type: file
+  register: fix_logs
+
+# 📥 2단계: 찾은 파일들을 컨트롤 노드로 가져오기
+- name: Fetch fix logs to control node
+  fetch:
+    src: "{{ item.path }}"
+    dest: "./collected_logs/{{ inventory_hostname }}/"
+    flat: yes                              # 파일 이름만 유지하고 평평하게 저장
+  loop: "{{ fix_logs.files }}"
+  when: fix_logs.matched | default(0) > 0
