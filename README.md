@@ -80,50 +80,111 @@ Rocky Linux / RHEL 계열(테스트 기준: Rocky 8.10)을 대상으로
 
 ### 4-1. 사전 준비
 
-- 컨트롤 노드
-  - Ansible 설치 (2.10 이상 권장)
-  - 프로젝트 클론 후 이 디렉터리에서 명령 실행
-- 대상 서버
-  - Rocky Linux / RHEL 계열 (테스트 기준 Rocky 8.10)
-  - ssh 키 기반 접속 가능해야 함
+**컨트롤 노드 (Ansible 실행 서버)**
+- Ansible 설치: `pip install ansible>=2.10`
+- Python 3.6 이상
+- SSH 클라이언트
 
-### 4-2. 인벤토리 설정
+**대상 서버 (Rocky Linux)**
+- Rocky Linux 8.x / RHEL 8.x 이상
+- SSH 서버 실행 중
+- SSH 키 기반 인증 설정 완료
+- rocky 사용자 계정 존재
+- 인터넷 연결 (패키지 설치 필요 시)
 
-- `inventory/hosts.ini` 예시
+### 4-2. 초기 설정
 
-  - `[rocky_servers]` 그룹에 대상 서버 IP/도메인 입력
-  - `ansible_ssh_private_key_file`에 키 경로 지정
-  - `ansible_user`는 대상 서버 계정으로 변경
+1. **프로젝트 클론**
+   ```bash
+   git clone <repository-url>
+   cd rocky-ansible-security
+   ```
 
-### 4-3. 조치(Enforce) 실행
+2. **SSH 키 준비**
+   - 대상 서버의 프라이빗 키를 `~/.ssh/rocky-key.pem`에 저장
+   - 권한 설정: `chmod 600 ~/.ssh/rocky-key.pem`
 
-- 전체 취약점 조치 + 로그 수집
+3. **인벤토리 파일 생성**
+   ```bash
+   cp inventory/hosts.ini.example inventory/hosts.ini
+   vim inventory/hosts.ini  # 실제 IP와 SSH 정보 입력
+   ```
 
-  - `playbooks/security_check.yml` 실행
-  - 원격: `/opt/security/logs/vuln_fix_*.log` 생성
-  - 로컬: `./collected_logs/<호스트명>/vuln_fix_*.log` 자동 수집
+4. **대상 서버에서 sudo 설정** (필수)
+   ```bash
+   ssh -i ~/.ssh/rocky-key.pem rocky@<TARGET_IP>
+   sudo su -
+   echo "rocky ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/rocky
+   chmod 440 /etc/sudoers.d/rocky
+   exit
+   ```
 
-- 실행 후
-  - 운영 환경에 맞지 않는 조치가 없는지
-    - `vuln_fix_*.log` 내용을 꼭 검토
+### 4-3. 로그 디렉토리 초기화 (재실행 시)
 
-### 4-4. 점검(Audit) 실행
+대상 서버에서 기존 로그를 초기화하고 싶을 때:
+```bash
+ansible rocky01 -i inventory/hosts.ini -m shell -a "rm -rf /opt/security/logs/*"
+```
 
-- 현재 설정 상태만 진단하고 싶은 경우
+### 4-4. 조치(Enforce) 실행
 
-  - `playbooks/security_audit.yml` 실행
-  - 원격: `/opt/security/logs/vuln_audit_*.log` 생성
-  - 로컬: `./collected_logs/<호스트명>/vuln_audit_*.log` 자동 수집
+전체 취약점 조치 + 로그 수집 (실제 시스템 설정 변경):
+```bash
+ansible-playbook -i inventory/hosts.ini playbooks/security_check.yml
+```
 
-- Ansible 출력이 너무 길어지는 것을 방지하기 위해
-  - audit 결과 전체를 터미널에 다 찍지 않고
-  - 요약 정보만 보고, 상세 내용은 **수집된 로그 파일을 열어 확인**하는 방식으로 사용
+**실행 결과:**
+- 원격 서버: `/opt/security/logs/vuln_fix_YYYYMMDD_HHMMSS_PID.log` 생성
+- 로컬: `./collected_logs/<호스트명>/vuln_fix_*.log` 자동 수집
+
+**조치 후 확인:**
+```bash
+# 생성된 로그 확인
+cat collected_logs/rocky01/vuln_fix_*.log
+
+# 조치 내용이 예상과 맞는지 검토 필수!
+# 불필요한 조치가 있으면 restore.sh로 롤백 가능
+```
+
+### 4-5. 점검(Audit) 실행
+
+현재 설정 상태만 진단 (시스템 변경 없음):
+```bash
+ansible-playbook -i inventory/hosts.ini playbooks/security_audit.yml
+```
+
+**실행 결과:**
+- 원격 서버: `/opt/security/logs/vuln_audit_YYYYMMDD_HHMMSS_PID.log` 생성
+- 로컬: `./collected_logs/<호스트명>/vuln_audit_*.log` 자동 수집
+
+**결과 확인:**
+```bash
+# 진단 결과 확인
+cat collected_logs/rocky01/vuln_audit_*.log
+
+# 항목별 상태 확인:
+# ✅ PASS   - 기준 충족
+# ❌ FAIL   - 기준 미충족 (조치 필요)
+# ⚠  WARN   - 구현 대기 중
+```
+
+### 4-6. 개발/디버깅용 명령
+
+단일 호스트에 대한 명령 실행:
+```bash
+# 단일 스크립트 테스트
+ansible rocky01 -i inventory/hosts.ini -m copy -a "src=playbooks/roles/security_script/files/U-01.sh dest=/tmp/ owner=root mode=0755"
+
+# 원격 명령 직접 실행
+ansible rocky01 -i inventory/hosts.ini -m shell -a "cd /opt/security && bash U-01.sh"
+```
 
 ---
 
 ## 5. 디렉터리 구조 (요약)
 
 - `inventory/hosts.ini` : 대상 서버 목록 및 접속 정보
+- `inventory/hosts.ini.example` : hosts.ini 예시 파일 (GitHub에 올림)
 - `playbooks/security_check.yml` : 조치(Enforce)용 플레이북
 - `playbooks/security_audit.yml` : 점검(Audit)용 플레이북
 - `roles/security_script/files/`
@@ -139,9 +200,76 @@ Rocky Linux / RHEL 계열(테스트 기준: Rocky 8.10)을 대상으로
     - `collected_logs/<inventory_hostname>/vuln_fix_*.log`
     - `collected_logs/<inventory_hostname>/vuln_audit_*.log`
 
----
+## 6. 문제 해결
 
-## 6. 주의사항
+### SSH/연결 오류
+
+**오류: `Failed to connect to the host via ssh`**
+```bash
+# 1. SSH 키 확인
+ls -la ~/.ssh/rocky-key.pem
+chmod 600 ~/.ssh/rocky-key.pem
+
+# 2. 인벤토리의 IP 주소 확인
+cat inventory/hosts.ini
+
+# 3. 수동 SSH 접속 테스트
+ssh -i ~/.ssh/rocky-key.pem rocky@<IP_ADDRESS>
+
+# 4. SSH 디버그 모드
+ssh -vvv -i ~/.ssh/rocky-key.pem rocky@<IP_ADDRESS>
+```
+
+### Sudo 권한 오류
+
+**오류: `/usr/bin/sudo: Permission denied`**
+```bash
+# 1. 대상 서버에서 rocky 사용자의 sudo 권한 확인
+ssh -i ~/.ssh/rocky-key.pem rocky@<IP_ADDRESS>
+sudo -l
+
+# 2. 권한 추가 (root로 실행)
+sudo su -
+echo "rocky ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/rocky
+chmod 440 /etc/sudoers.d/rocky
+```
+
+### Ansible 연결 테스트
+
+```bash
+# 전체 호스트 ping
+ansible all -i inventory/hosts.ini -m ping
+
+# 디버그 모드
+ansible rocky01 -i inventory/hosts.ini -m ping -vvv
+
+# 특정 호스트 연결 정보 확인
+ansible rocky01 -i inventory/hosts.ini -m debug -a "msg={{ ansible_host }}"
+```
+
+## 7. 보안 주의사항
+
+### 파일 보안
+
+- **`hosts.ini` 파일 관리**
+  - 실제 IP 주소와 SSH 키 경로 포함
+  - GitHub에 절대 올리지 마세요
+  - `.gitignore`에 추가 권장:
+    ```
+    inventory/hosts.ini
+    collected_logs/
+    ```
+
+- **SSH 프라이빗 키 관리**
+  - 파일 권한을 `600` 으로 유지
+  - 절대 GitHub에 올리지 마세요
+  - 정기적으로 백업하세요
+
+- **NOPASSWD sudo 설정**
+  - 프라이빗 네트워크 환경에서만 사용 권장
+  - 공개 환경에서는 비밀번호 기반 sudo 고려
+
+### 운영 환경 적용 전 필수 확인
 
 - 이 프로젝트는
   - **테스트/랩 환경에서 검증을 거친 샘플 스크립트**입니다.
