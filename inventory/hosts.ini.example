@@ -1,0 +1,22 @@
+# Ansible Inventory Example
+# 이 파일을 복사해서 hosts.ini 파일을 만들고 실제 값으로 수정하세요
+
+[rocky_servers]
+# 호스트명 또는 IP와 실제 접속 IP 주소
+rocky01 ansible_host=YOUR_INSTANCE_IP
+
+[rocky_servers:vars]
+# SSH 접속할 사용자명
+ansible_user=rocky
+
+# SSH 프라이빗 키 파일 경로
+ansible_ssh_private_key_file=~/.ssh/YOUR_KEY.pem
+
+# 권한 상승 활성화 (루트 권한 필요)
+ansible_become=true
+
+# 권한 상승 방법 (sudo 사용)
+ansible_become_method=sudo
+
+# 권한 상승 대상 사용자 (root)
+ansible_become_user=root
