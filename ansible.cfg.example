@@ -3,6 +3,7 @@ inventory = inventory/hosts.ini
 roles_path = roles
 private_key_file = ~/.ssh/YOUR_KEY.pem #키 경로 수정
 host_key_checking = False
+become_ask_pass = False
 
 [ssh_connection]
 pipelining = True
