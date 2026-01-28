@@ -1,5 +1,11 @@
 # roles/security_script/tasks/main.yml
 # 조치(enforce) 시나리오
+- name: Precheck | sudo works non-interactively
+  become: false
+  command: sudo -n id
+  register: sudo_check
+  changed_when: false
+  failed_when: sudo_check.rc != 0
 
 - name: Create base directory for security scripts
   file:
