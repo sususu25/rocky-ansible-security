@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "[U-23] SUID / SGID 설정 파일 점검 및 조치"
+echo "[U-23] SUID/SGID 설정 파일 점검 및 조치 (안전 Enforce 버전)"
 
 #####################################
 # root 권한 확인
@@ -14,60 +14,84 @@ fi
 # find 명령어 존재 여부 확인
 #####################################
 if ! command -v find >/dev/null 2>&1; then
-    echo "[U-23][ERROR] find 명령어 없음 (findutils 미설치)"
-    echo "[U-23][RESULT] 점검 불가"
-    exit 2
+    echo "[U-23][ERROR] find 명령어 없음"
+    exit 1
 fi
 
 #####################################
-# 점검 대상 경로 정의
-# (사용자 생성 가능 영역만 조치)
+# 정책(Enforce 우선, 단 시스템 핵심 바이너리는 자동 변경 금지)
+# - 자동 조치 범위: 사용자/앱이 임의 파일을 만들 수 있는 영역
+# - 추가 확인 범위: /usr/bin/sudo, /usr/bin/passwd, /usr/bin/su 등 핵심 바이너리
 #####################################
-TARGET_PATHS=(
-    /usr/local
-    /home
-    /tmp
-    /var/tmp
+AUTO_PATHS=(
+    "/home"
+    "/tmp"
+    "/var/tmp"
+    "/usr/local"
+    "/opt"
+    "/srv"
 )
 
+CRITICAL_FILES=(
+    "/usr/bin/sudo"
+    "/usr/bin/passwd"
+    "/usr/bin/su"
+)
+
+REMOVED_COUNT=0
+FOUND_COUNT=0
+
 #####################################
-# SUID / SGID 파일 탐색
+# 1) 자동 조치(Enforce): AUTO_PATHS 내 SUID/SGID 제거
 #####################################
-FOUND=false
+for path in "${AUTO_PATHS[@]}"; do
+    if [ -d "$path" ]; then
+        echo "[U-23] 자동 조치 대상 경로 검사: $path"
+        while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            FOUND_COUNT=$((FOUND_COUNT + 1))
 
-for path in "${TARGET_PATHS[@]}"; do
-    [ -d "$path" ] || continue
+            # 혹시라도 critical 파일이 AUTO_PATHS에 링크로 걸리는 등 예외 방지
+            for c in "${CRITICAL_FILES[@]}"; do
+                if [ "$file" = "$c" ]; then
+                    echo "[U-23][SKIP] 핵심 바이너리 자동조치 금지: $file"
+                    continue 2
+                fi
+            done
 
-    while IFS= read -r file; do
-        FOUND=true
-        echo "[U-23][CHECK] $file"
-
-        chmod -s "$file"
-        echo "[U-23][FIX] $file → SUID/SGID 제거"
-
-    done < <(
-        find "$path" -xdev -type f \( -perm -04000 -o -perm -02000 \) 2>/dev/null
-    )
+            BEFORE="$(stat -c '%A %U:%G %a %n' "$file" 2>/dev/null)"
+            chmod u-s,g-s "$file" 2>/dev/null
+            AFTER="$(stat -c '%A %U:%G %a %n' "$file" 2>/dev/null)"
+            REMOVED_COUNT=$((REMOVED_COUNT + 1))
+            echo "[U-23][FIX] SUID/SGID 제거: $BEFORE -> $AFTER"
+        done < <(find "$path" -xdev -type f \( -perm -04000 -o -perm -02000 \) 2>/dev/null)
+    fi
 done
 
 #####################################
-# 점검 결과 판단
+# 2) 추가 확인(자동 변경 금지): 핵심 바이너리 상태만 출력
 #####################################
-if [ "$FOUND" = false ]; then
-    echo "[U-23][RESULT] 사용자 영역 내 불필요한 SUID/SGID 파일 없음 (양호)"
+echo "[U-23] 추가 확인(자동 변경 금지) - 핵심 바이너리 점검"
+for f in "${CRITICAL_FILES[@]}"; do
+    if [ -f "$f" ]; then
+        if [ -u "$f" ] || [ -g "$f" ]; then
+            echo "[U-23][CHECK] 핵심 바이너리 특수권한 존재(자동 미조치): $(stat -c '%A %U:%G %a %n' "$f")"
+        else
+            echo "[U-23][OK] 핵심 바이너리 특수권한 없음: $(stat -c '%A %U:%G %a %n' "$f")"
+        fi
+    else
+        echo "[U-23][INFO] 파일 없음: $f"
+    fi
+done
+
+#####################################
+# 결과 요약
+#####################################
+if [ "$FOUND_COUNT" -eq 0 ]; then
+    echo "[U-23][RESULT] 자동 조치 대상 경로 내 SUID/SGID 파일 없음 (양호)"
 else
-    echo "[U-23][RESULT] 불필요한 SUID/SGID 파일 조치 완료"
+    echo "[U-23][RESULT] 자동 조치 대상 경로 발견 $FOUND_COUNT건 중 $REMOVED_COUNT건 SUID/SGID 제거"
 fi
 
-#####################################
-# su 명령어 추가 보호 (필수)
-#####################################
-if [ -f /usr/bin/su ]; then
-    chgrp wheel /usr/bin/su 2>/dev/null
-    chmod 4750 /usr/bin/su
-    echo "[U-23][HARDEN] /usr/bin/su → wheel + 4750"
-fi
-
-echo "[U-23] 점검 및 조치 완료"
+echo "[U-23] 점검/조치 완료"
 exit 0
-
