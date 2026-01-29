@@ -35,6 +35,17 @@
   shell: |
     cd /opt/security
     ./run_all.sh
+  register: sec_run
+  changed_when: false
+  failed_when: sec_run.rc not in [0, 2]   # 0=정상(✅), 2=수동/보류(⚠️)는 실패로 안 봄
+
+- name: Print summary (OK/MANUAL/FAIL)
+  debug:
+    msg: |
+      Security run result:
+        rc={{ sec_run.rc }}
+        status={{ 'OK ✅' if sec_run.rc==0 else ('MANUAL ⚠️' if sec_run.rc==2 else 'FAIL ❌') }}
+
 
 # 🔎 1단계: 원격 서버에서 audit 로그 파일 목록 찾기
 - name: Find audit log files
@@ -49,6 +60,6 @@
   fetch:
     src: "{{ item.path }}"
     dest: "./collected_logs/{{ inventory_hostname }}/"
-    flat: yes                              # 파일 이름만 유지하고 평평하게 저장
+    flat: yes
   loop: "{{ fix_logs.files }}"
-  when: fix_logs.matched | default(0) > 0
+  when: fix_logs.matched | int > 0
