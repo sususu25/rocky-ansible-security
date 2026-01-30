@@ -1,64 +1,31 @@
 #!/bin/bash
+# U-64.sh (심플)
+# 목적: "보안 업데이트가 남아있는지"만 점검하고, 남아있으면 수동 업데이트 안내(⚠️)
 
-echo "[U-64] OS 및 커널 버전 점검 시작"
-echo "----------------------------------------"
+echo "[U-64] OS 및 보안 업데이트 필요 여부 점검"
 
-############################################
-# Step 1. OS 및 커널 정보 수집
-############################################
+OS_INFO=$(grep -E '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d= -f2- | tr -d '"')
+KERNEL_VER=$(uname -r 2>/dev/null)
 
-# OS 정보
-if [ -f /etc/os-release ]; then
-    OS_INFO=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')
-else
-    OS_INFO="확인 불가"
+echo "[U-64] OS: ${OS_INFO:-UNKNOWN}"
+echo "[U-64] Kernel: ${KERNEL_VER:-UNKNOWN}"
+
+if ! command -v dnf >/dev/null 2>&1; then
+  echo "⚠️ [U-64] dnf 없음 → 업데이트 여부 판단 불가"
+  echo "[U-64] 수동 조치: dnf update -y --security"
+  exit 2
 fi
 
-# 커널 정보
-KERNEL_VER=$(uname -r)
-
-echo "[U-64][INFO] OS 정보        : $OS_INFO"
-echo "[U-64][INFO] 커널 버전      : $KERNEL_VER"
-
-############################################
-# Step 2. 점검 대상 여부 판단
-############################################
-
-if [ "$OS_INFO" = "확인 불가" ]; then
-    echo "[U-64][RESULT] 점검 불가"
-    echo "[U-64][REASON] OS 정보를 확인할 수 없음"
-    echo "[U-64][ACTION] 관리자 수동 확인 필요"
-    exit 1
+# 보안 업데이트 목록 조회(조용히) → 있으면 수동 조치
+SEC_LIST=$(dnf -q updateinfo list --security 2>/dev/null | awk 'NF>0')
+if [ -z "$SEC_LIST" ]; then
+  echo "✅ [U-64] 보안 업데이트 목록 없음(또는 조회 결과 없음) → 양호로 처리"
+  exit 0
 fi
 
-echo "[U-64][RESULT] 점검 대상 시스템"
-
-############################################
-# Step 3. EOL 및 보안 업데이트 상태 판단
-############################################
-# ※ 자동 판별은 불가 → 정책상 수동 확인 대상
-
-echo "[U-64][CHECK] OS 버전 EOL 여부 자동 판단 불가"
-echo "[U-64][CHECK] 커널 보안 패치 적용 여부 자동 판단 불가"
-
-############################################
-# Step 4. 조치 여부 판단
-############################################
-
-echo "[U-64][ACTION] 자동 조치 불가"
-echo "[U-64][ACTION] 본 항목은 점검 및 관리적 조치 대상"
-
-############################################
-# Step 5. 권고 사항 출력
-############################################
-
-echo "[U-64][RECOMMEND]"
-echo " - 벤더(OS 공급사) 지원 정책에 따라 EOL 여부 확인"
-echo " - EOL OS 사용 중인 경우 최신 지원 버전으로 업그레이드"
-echo " - 최신 보안 패치가 적용된 커널 버전 유지"
-echo " - 정기적인 OS/Kernel 업데이트 정책 수립"
-
-echo "----------------------------------------"
-echo "[U-64] 점검 종료 (점검 + 권고 완료)"
-exit 0
-
+# 대략 개수만
+SEC_COUNT=$(echo "$SEC_LIST" | grep -v -E '^(Last metadata expiration check:|Update ID|Updates Information Summary)' | wc -l | tr -d ' ')
+echo "⚠️ [U-64] 보안 업데이트 항목 존재: ${SEC_COUNT}건"
+echo "[U-64] 수동 조치: dnf update -y --security"
+echo "[U-64] (옵션) 커널 제외: dnf update -y --security --exclude=kernel*"
+exit 2

@@ -1,58 +1,32 @@
 #!/bin/bash
+# U-65.sh (심플)
+# 목적: chrony(chronyd)가 동작하고 동기화 징후가 있는지 점검
 
-echo "[U-65] 시간 동기화(NTP/Chrony) 서비스 점검 시작"
+echo "[U-65] 시간 동기화(Chrony) 점검"
 
-############################
-# Chrony (RHEL8+/Rocky)
-############################
-if systemctl list-unit-files | grep -q "^chronyd.service"; then
-    CHRONY_STATE=$(systemctl is-active chronyd 2>/dev/null)
-
-    echo "[U-65] Chrony 서비스 존재 확인"
-
-    if [ "$CHRONY_STATE" = "active" ]; then
-        echo "[U-65] Chrony 서비스 사용 중 (active)"
-
-        echo "[U-65] Chrony 동기화 서버 확인"
-        chronyc sources 2>/dev/null
-
-        # 설정 파일 존재 시만 처리
-        if [ -f /etc/chrony.conf ]; then
-            echo "[U-65] /etc/chrony.conf 설정 파일 존재"
-            echo "[U-65] NTP 서버 설정 여부 수동 확인 필요"
-        fi
-
-    else
-        echo "[U-65] Chrony 서비스 존재하나 사용 중 아님 → 미적용"
-    fi
-
-############################
-# NTP (구버전)
-############################
-elif systemctl list-unit-files | grep -q "^ntpd.service"; then
-    NTP_STATE=$(systemctl is-active ntpd 2>/dev/null)
-
-    echo "[U-65] NTP 서비스 존재 확인"
-
-    if [ "$NTP_STATE" = "active" ]; then
-        echo "[U-65] NTP 서비스 사용 중 (active)"
-
-        echo "[U-65] NTP 동기화 서버 확인"
-        ntpq -pn 2>/dev/null
-
-        if [ -f /etc/ntp.conf ]; then
-            echo "[U-65] /etc/ntp.conf 설정 파일 존재"
-            echo "[U-65] NTP 서버 설정 여부 수동 확인 필요"
-        fi
-
-    else
-        echo "[U-65] NTP 서비스 존재하나 사용 중 아님 → 미적용"
-    fi
-
+# 서비스 존재/상태
+if command -v systemctl >/dev/null 2>&1; then
+  ACTIVE=$(systemctl is-active chronyd 2>/dev/null)
 else
-    echo "[U-65] NTP/Chrony 서비스 미설치 또는 미사용 → 미적용"
+  ACTIVE="unknown"
 fi
 
-echo "[U-65] 시간 동기화 서비스 점검 완료"
-exit 0
+echo "[U-65] chronyd 상태: $ACTIVE"
 
+if ! command -v chronyc >/dev/null 2>&1; then
+  echo "⚠️ [U-65] chronyc 없음 → 동기화 상태 확인 불가"
+  echo "[U-65] 수동 조치: dnf install -y chrony && systemctl enable --now chronyd"
+  exit 2
+fi
+
+# sources 출력에서 ^* (선택된 소스) 가 있으면 동기화 중으로 간주
+SRC=$(chronyc sources 2>/dev/null | tail -n +1)
+if echo "$SRC" | grep -q '^\^\*'; then
+  echo "✅ [U-65] 동기화 소스(^*) 확인됨 → 양호"
+  exit 0
+fi
+
+echo "⚠️ [U-65] 동기화 소스(^*) 미확인 → 확인 필요"
+echo "[U-65] 수동 확인: chronyc sources -v / chronyc tracking"
+echo "[U-65] 수동 조치(필요 시): /etc/chrony.conf 서버 설정 후 systemctl restart chronyd"
+exit 2
