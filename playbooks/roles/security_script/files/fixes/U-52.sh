@@ -1,77 +1,55 @@
 #!/bin/bash
-echo "[U-52] Telnet 서비스 비활성화 점검"
+echo "[U-52] Telnet 서비스 비활성화 점검 및 조치"
 
-# root 권한 확인
-if [ "$EUID" -ne 0 ]; then
-    echo "[U-52][ERROR] root 권한 필요"
-    exit 1
-fi
+BACKUP_SUFFIX="$(date +%Y%m%d_%H%M%S)"
 
-################################
-# SSH 서비스 확인
-################################
-if systemctl list-unit-files | grep -q sshd.service; then
-    systemctl is-active sshd >/dev/null 2>&1 || {
-        echo "[U-52] SSH 서비스 시작"
-        systemctl start sshd
-    }
-    echo "[U-52] SSH 서비스 정상"
-else
-    echo "[U-52][WARN] SSH 서비스 없음 (환경 확인 필요)"
-fi
-
-################################
-# systemd telnet.socket
-################################
-if systemctl list-unit-files | grep -q telnet.socket; then
-    if systemctl is-active telnet.socket >/dev/null 2>&1; then
-        systemctl stop telnet.socket
-        echo "[U-52] telnet.socket 중지"
-    fi
-    systemctl disable telnet.socket >/dev/null 2>&1
-    echo "[U-52] telnet.socket 비활성화"
-else
+# 1) systemd telnet.socket 비활성/마스킹
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl list-unit-files | grep -q '^telnet\.socket'; then
+    systemctl stop telnet.socket 2>/dev/null || true
+    systemctl disable telnet.socket 2>/dev/null || true
+    systemctl mask telnet.socket 2>/dev/null || true
+    echo "[U-52][FIX] systemd telnet.socket stop/disable/mask 완료"
+  else
     echo "[U-52] systemd telnet.socket 없음"
+  fi
 fi
 
-################################
-# xinetd 기반 telnet
-################################
-if [ -f /etc/xinetd.d/telnet ]; then
-    echo "[U-52] xinetd telnet 설정 파일 존재"
-    grep -n "disable" /etc/xinetd.d/telnet
-    echo "[U-52] → disable = yes 로 설정 필요 (자동 수정 안 함)"
-else
-    echo "[U-52] xinetd telnet 설정 없음"
+# 2) xinetd 기반 telnet 설정 disable=yes
+TELNET_XINETD="/etc/xinetd.d/telnet"
+if [ -f "$TELNET_XINETD" ]; then
+  cp -a "$TELNET_XINETD" "${TELNET_XINETD}.bak_${BACKUP_SUFFIX}"
+  echo "[U-52][INFO] 백업 생성: ${TELNET_XINETD}.bak_${BACKUP_SUFFIX}"
+
+  # disable 값 강제
+  if grep -q '^\s*disable\s*=' "$TELNET_XINETD"; then
+    sed -i 's/^\s*disable\s*=.*/\tdisable\t\t= yes/' "$TELNET_XINETD"
+  else
+    # disable 항목이 없으면 service 블록 내에 추가 (단순 삽입)
+    sed -i '/service[[:space:]]\+telnet[[:space:]]*{/a\ \tdisable\t\t= yes' "$TELNET_XINETD"
+  fi
+  echo "[U-52][FIX] xinetd telnet disable=yes 적용"
+  systemctl restart xinetd 2>/dev/null || true
 fi
 
-################################
-# inetd 기반 telnet
-################################
-if [ -f /etc/inetd.conf ]; then
-    echo "[U-52] inetd.conf telnet 설정 확인"
-    grep -n telnet /etc/inetd.conf || echo "[U-52] telnet 설정 없음"
-    echo "[U-52] → telnet 라인 주석 처리 필요"
-else
-    echo "[U-52] inetd.conf 없음"
+# 3) inetd 기반(/etc/inetd.conf) telnet 라인 주석 처리
+INETD="/etc/inetd.conf"
+if [ -f "$INETD" ]; then
+  cp -a "$INETD" "${INETD}.bak_${BACKUP_SUFFIX}"
+  echo "[U-52][INFO] 백업 생성: ${INETD}.bak_${BACKUP_SUFFIX}"
+
+  # telnet 라인 중 주석 아닌 것만 주석 처리
+  sed -i '/^[[:space:]]*telnet[[:space:]]/ s/^/# [DISABLED_BY_BASELINE] /' "$INETD"
+  echo "[U-52][FIX] inetd.conf telnet 라인 주석 처리"
+  # inetd 서비스 종류가 다양해서 재시작은 환경별로 다름 → 가능하면 건드림
+  (systemctl restart inetd 2>/dev/null || systemctl restart openbsd-inetd 2>/dev/null || true)
 fi
 
-################################
-# 요약
-################################
-cat <<EOF
+# 4) telnet-server 패키지 설치 시 제거(가능하면)
+if command -v rpm >/dev/null 2>&1 && rpm -q telnet-server >/dev/null 2>&1; then
+  echo "[U-52][FIX] telnet-server 패키지 설치됨 → 제거 시도"
+  (dnf -y remove telnet-server 2>/dev/null || yum -y remove telnet-server 2>/dev/null || true)
+fi
 
-[U-52] 조치 요약
-────────────────────────────────────
-✔ SSH 서비스 실행 확인
-✔ systemd telnet.socket 중지/비활성화
-✔ xinetd / inetd 기반 telnet 설정 점검 완료
-
-※ xinetd / inetd 설정은
-   운영 환경 확인 후 수동 주석 권장
-────────────────────────────────────
-EOF
-
-echo "[U-52] 점검 및 조치 완료"
+echo "[U-52] 점검/조치 완료"
 exit 0
-
