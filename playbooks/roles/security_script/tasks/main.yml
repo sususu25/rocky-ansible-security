@@ -1,5 +1,11 @@
+---
 # roles/security_script/tasks/main.yml
-# 조치(enforce) 시나리오
+# enforce 시나리오: U-*.sh 를 Ansible이 하나씩 순차 실행
+# 정책:
+# - rc=0 : OK ✅
+# - rc=2 : MANUAL/보류 ⚠️ (실패로 보지 않음)
+# - 그 외 : FAIL ❌ (단, 전체 실행은 끝까지 진행 후 마지막에 fail 처리)
+
 - name: Precheck | sudo works non-interactively
   become: false
   command: sudo -n id
@@ -13,53 +19,141 @@
     state: directory
     owner: root
     group: root
-    mode: '0755'
+    mode: "0755"
 
-- name: Copy run_all.sh
-  copy:
-    src: run_all.sh          # roles/security_script/files/run_all.sh 를 자동으로 찾음
-    dest: /opt/security/run_all.sh
+- name: Ensure fix and log directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
     owner: root
     group: root
-    mode: '0755'
+    mode: "0755"
+  loop:
+    - /opt/security/fixes
+    - /opt/security/logs
+
+# run_all.sh 는 더 이상 호출하지 않으므로 배포도 안 함
+# (files/run_all.sh 는 남겨도 무방. 필요하면 정리 PR에서 제거)
 
 - name: Copy fixes directory
   copy:
-    src: fixes/              # roles/security_script/files/fixes/ 를 자동으로 찾음
+    src: fixes/
     dest: /opt/security/fixes/
     owner: root
     group: root
-    mode: '0755'
+    mode: "0755"
 
-- name: Run security script
+# 이번 실행의 원격 로그 파일 경로
+- name: Set remote log file path
+  set_fact:
+    remote_log_file: "/opt/security/logs/vuln_fix_{{ ansible_date_time.date | regex_replace('-', '') }}_{{ ansible_date_time.time | regex_replace(':', '') }}.log"
+
+- name: Init remote log header
   shell: |
-    cd /opt/security
-    ./run_all.sh
-  register: sec_run
+    set -o pipefail
+    echo "[{{ ansible_date_time.iso8601 }}] ===== Ansible security run start =====" | tee -a "{{ remote_log_file }}"
+  args:
+    executable: /bin/bash
   changed_when: false
-  failed_when: sec_run.rc not in [0, 2]   # 0=정상(✅), 2=수동/보류(⚠️)는 실패로 안 봄
 
-- name: Print summary (OK/MANUAL/FAIL)
+# U-*.sh 목록 수집
+- name: Find fix scripts (U-*.sh)
+  find:
+    paths: /opt/security/fixes
+    patterns: "U-*.sh"
+    file_type: file
+  register: fix_scripts
+
+- name: Build sorted fix list
+  set_fact:
+    fix_list: "{{ fix_scripts.files | sort(attribute='path') }}"
+
+# 핵심: 스크립트를 하나씩 실행 (실패해도 끝까지)
+# stdout/stderr는 원격 로그 파일에 append됨
+- name: Run each fix script sequentially (do not stop on failure)
+  shell: |
+    set -o pipefail
+    echo "▶ [{{ inventory_hostname }}] START {{ item.path | basename }}" | tee -a "{{ remote_log_file }}"
+    bash "{{ item.path }}" 2>&1 | tee -a "{{ remote_log_file }}"
+    rc=${PIPESTATUS[0]}
+    echo "■ [{{ inventory_hostname }}] END {{ item.path | basename }} rc=${rc}" | tee -a "{{ remote_log_file }}"
+    exit $rc
+  args:
+    executable: /bin/bash
+  register: fix_run
+  loop: "{{ fix_list }}"
+  loop_control:
+    label: "{{ inventory_hostname }} :: {{ item.path | basename }}"
+  changed_when: false
+  failed_when: false   # ✅ 여기 때문에 rc=1이어도 play가 중단되지 않음
+
+# 결과 집계
+- name: Compute result counts (OK/MANUAL/FAIL)
+  set_fact:
+    total_cnt: "{{ (fix_run.results | default([])) | length }}"
+    ok_cnt: >-
+      {{
+        (fix_run.results | default([]))
+        | selectattr('rc', 'defined')
+        | selectattr('rc', 'equalto', 0)
+        | list
+        | length
+      }}
+    manual_cnt: >-
+      {{
+        (fix_run.results | default([]))
+        | selectattr('rc', 'defined')
+        | selectattr('rc', 'equalto', 2)
+        | list
+        | length
+      }}
+    fail_list: >-
+      {{
+        (fix_run.results | default([]))
+        | selectattr('rc', 'defined')
+        | rejectattr('rc', 'in', [0, 2])
+        | list
+      }}
+    fail_cnt: "{{ fail_list | length }}"
+
+# FAIL 항목만 터미널에 상세 출력 (터미널 더러움 최소화)
+- name: Print failure outputs only
   debug:
     msg: |
-      Security run result:
-        rc={{ sec_run.rc }}
-        status={{ 'OK ✅' if sec_run.rc==0 else ('MANUAL ⚠️' if sec_run.rc==2 else 'FAIL ❌') }}
+      [FAIL DETAIL]
+      Host: {{ inventory_hostname }}
+      Script: {{ item.item.path | basename }}
+      rc: {{ item.rc }}
 
+      ---- stdout ----
+      {{ item.stdout | default('') }}
 
-# 🔎 1단계: 원격 서버에서 audit 로그 파일 목록 찾기
-- name: Find audit log files
-  find:
-    paths: /opt/security/logs
-    patterns: "vuln_fix_*.log"           # 또는 "*.log" 로 전체 가져와도 됨
-    file_type: file
-  register: fix_logs
+      ---- stderr ----
+      {{ item.stderr | default('') }}
+  loop: "{{ fail_list }}"
+  when: fail_cnt | int > 0
 
-# 📥 2단계: 찾은 파일들을 컨트롤 노드로 가져오기
-- name: Fetch fix logs to control node
+# 최종 요약 출력
+- name: Print final summary
+  debug:
+    msg: |
+      [SUMMARY] Host={{ inventory_hostname }}
+      - total: {{ total_cnt }}
+      - ok(✅): {{ ok_cnt }}
+      - manual(⚠️): {{ manual_cnt }}
+      - fail(❌): {{ fail_cnt }}
+      - remote_log: {{ remote_log_file }}
+
+# (선택) 로그 파일을 컨트롤 노드로 가져오기
+# 기존 네 fetch 로직을 유지하고 싶으면 아래 대신 기존 블록 그대로 써도 됨.
+- name: Fetch this run log to control node
   fetch:
-    src: "{{ item.path }}"
+    src: "{{ remote_log_file }}"
     dest: "./collected_logs/{{ inventory_hostname }}/"
     flat: yes
-  loop: "{{ fix_logs.files }}"
-  when: fix_logs.matched | int > 0
+
+# 끝까지 실행한 뒤 FAIL 있으면 플레이 실패 처리
+- name: Fail play at end when failures exist
+  fail:
+    msg: "There are failed items (fail={{ fail_cnt }}). Check log: {{ remote_log_file }}"
+  when: fail_cnt | int > 0
