@@ -1,63 +1,40 @@
----
-# roles/security_script/tasks/main.yml
-# enforce 시나리오: U-*.sh 를 Ansible이 하나씩 순차 실행
-# 정책:
-# - rc=0 : OK ✅
-# - rc=2 : MANUAL/보류 ⚠️ (실패로 보지 않음)
-# - 그 외 : FAIL ❌ (단, 전체 실행은 끝까지 진행 후 마지막에 fail 처리)
+# playbooks/roles/security_script/tasks/main.yml
 
 - name: Precheck | sudo works non-interactively
-  become: false
-  command: sudo -n id
-  register: sudo_check
+  become: yes
+  command: sudo -n true
   changed_when: false
-  failed_when: sudo_check.rc != 0
-
-- name: Create base directory for security scripts
-  file:
-    path: /opt/security
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
 
 - name: Ensure fix and log directories exist
+  become: yes
   file:
     path: "{{ item }}"
     state: directory
-    owner: root
-    group: root
     mode: "0755"
   loop:
     - /opt/security/fixes
     - /opt/security/logs
 
-# run_all.sh 는 더 이상 호출하지 않으므로 배포도 안 함
-# (files/run_all.sh 는 남겨도 무방. 필요하면 정리 PR에서 제거)
-
 - name: Copy fixes directory
+  become: yes
   copy:
     src: fixes/
     dest: /opt/security/fixes/
-    owner: root
-    group: root
     mode: "0755"
 
-# 이번 실행의 원격 로그 파일 경로
 - name: Set remote log file path
   set_fact:
-    remote_log_file: "/opt/security/logs/vuln_fix_{{ ansible_date_time.date | regex_replace('-', '') }}_{{ ansible_date_time.time | regex_replace(':', '') }}.log"
+    remote_log: "/opt/security/logs/vuln_fix_{{ lookup('pipe','date +%Y%m%d_%H%M%S') }}.log"
 
 - name: Init remote log header
+  become: yes
   shell: |
-    set -o pipefail
-    echo "[{{ ansible_date_time.iso8601 }}] ===== Ansible security run start =====" | tee -a "{{ remote_log_file }}"
+    echo "[{{ lookup('pipe','date -u +%Y-%m-%dT%H:%M:%SZ') }}] ===== Ansible security run start =====" > "{{ remote_log }}"
   args:
     executable: /bin/bash
-  changed_when: false
 
-# U-*.sh 목록 수집
 - name: Find fix scripts (U-*.sh)
+  become: yes
   find:
     paths: /opt/security/fixes
     patterns: "U-*.sh"
@@ -66,94 +43,128 @@
 
 - name: Build sorted fix list
   set_fact:
-    fix_list: "{{ fix_scripts.files | sort(attribute='path') }}"
+    fix_list: "{{ fix_scripts.files | map(attribute='path') | sort }}"
 
-# 핵심: 스크립트를 하나씩 실행 (실패해도 끝까지)
-# stdout/stderr는 원격 로그 파일에 append됨
+# 결과 누적용
+- name: Init result containers
+  set_fact:
+    ok_list: []
+    manual_list: []
+    fail_list: []
+    manual_blocks: []
+
 - name: Run each fix script sequentially (do not stop on failure)
+  become: yes
   shell: |
     set -o pipefail
-    echo "▶ [{{ inventory_hostname }}] START {{ item.path | basename }}" | tee -a "{{ remote_log_file }}"
-    bash "{{ item.path }}" 2>&1 | tee -a "{{ remote_log_file }}"
-    rc=${PIPESTATUS[0]}
-    echo "■ [{{ inventory_hostname }}] END {{ item.path | basename }} rc=${rc}" | tee -a "{{ remote_log_file }}"
+    script="{{ item }}"
+    base="$(basename "{{ item }}")"
+
+    echo "▶ [{{ inventory_hostname }}] START ${base}" >> "{{ remote_log }}"
+    bash "${script}" >> "{{ remote_log }}" 2>&1
+    rc=$?
+
+    # 상태 라벨 표준화: 0 OK / 2 MANUAL / else FAIL
+    if [ "$rc" -eq 0 ]; then
+      echo "✅ [{{ inventory_hostname }}] OK   ${base} (rc=${rc})" >> "{{ remote_log }}"
+    elif [ "$rc" -eq 2 ]; then
+      echo "⚠️ [{{ inventory_hostname }}] MANUAL ${base} (rc=${rc})" >> "{{ remote_log }}"
+    else
+      echo "❌ [{{ inventory_hostname }}] FAIL ${base} (rc=${rc})" >> "{{ remote_log }}"
+    fi
+
+    echo "■ [{{ inventory_hostname }}] END ${base} rc=${rc}" >> "{{ remote_log }}"
+    echo "" >> "{{ remote_log }}"
     exit $rc
   args:
     executable: /bin/bash
-  register: fix_run
   loop: "{{ fix_list }}"
-  loop_control:
-    label: "{{ inventory_hostname }} :: {{ item.path | basename }}"
-  changed_when: false
-  failed_when: false   # ✅ 여기 때문에 rc=1이어도 play가 중단되지 않음
+  register: run_results
+  ignore_errors: true
 
-# 결과 집계
+# rc 기반으로 리스트 분류
+- name: Classify results (OK/MANUAL/FAIL)
+  set_fact:
+    ok_list: "{{ ok_list + [item.item | basename] }}"
+  loop: "{{ run_results.results }}"
+  when: (item.rc | default(1)) == 0
+
+- name: Classify results (MANUAL)
+  set_fact:
+    manual_list: "{{ manual_list + [item.item | basename] }}"
+  loop: "{{ run_results.results }}"
+  when: (item.rc | default(1)) == 2
+
+- name: Classify results (FAIL)
+  set_fact:
+    fail_list: "{{ fail_list + [item.item | basename] }}"
+  loop: "{{ run_results.results }}"
+  when: (item.rc | default(1)) not in [0,2]
+
+# MANUAL 항목에 대한 가이드 블록 만들기
+- name: Build MANUAL ACTION blocks
+  set_fact:
+    manual_blocks: "{{ manual_blocks + [ block ] }}"
+  vars:
+    fname: "{{ item }}"
+    guide: "{{ manual_guides.get(fname, {}) }}"
+    block: |
+      ──────────────────────────────────────────────
+      [MANUAL ACTION] {{ fname }}
+      - title: {{ guide.title | default('manual item') }}
+      - why:   {{ guide.why   | default('requires operator decision/approval') }}
+      - next:
+      {% for n in (guide.next | default([])) %}
+        - {{ n }}
+      {% endfor %}
+      - evidence(cmd):
+      {% for e in (guide.evidence | default([])) %}
+        - {{ e }}
+      {% endfor %}
+      ──────────────────────────────────────────────
+  loop: "{{ manual_list }}"
+
+# MANUAL이면 “즉시” 원격 로그에 블록 append
+- name: Append MANUAL ACTION blocks to remote log
+  become: yes
+  shell: |
+    cat >> "{{ remote_log }}" <<'EOF'
+    {% for b in manual_blocks %}
+    {{ b }}
+
+    {% endfor %}
+    EOF
+  args:
+    executable: /bin/bash
+  when: manual_blocks | length > 0
+
+# 카운트/요약
 - name: Compute result counts (OK/MANUAL/FAIL)
   set_fact:
-    total_cnt: "{{ (fix_run.results | default([])) | length }}"
-    ok_cnt: >-
-      {{
-        (fix_run.results | default([]))
-        | selectattr('rc', 'defined')
-        | selectattr('rc', 'equalto', 0)
-        | list
-        | length
-      }}
-    manual_cnt: >-
-      {{
-        (fix_run.results | default([]))
-        | selectattr('rc', 'defined')
-        | selectattr('rc', 'equalto', 2)
-        | list
-        | length
-      }}
-    fail_list: >-
-      {{
-        (fix_run.results | default([]))
-        | selectattr('rc', 'defined')
-        | rejectattr('rc', 'in', [0, 2])
-        | list
-      }}
-    fail_cnt: "{{ fail_list | length }}"
+    total_count: "{{ fix_list | length }}"
+    ok_count: "{{ ok_list | length }}"
+    manual_count: "{{ manual_list | length }}"
+    fail_count: "{{ fail_list | length }}"
 
-# FAIL 항목만 터미널에 상세 출력 (터미널 더러움 최소화)
-- name: Print failure outputs only
-  debug:
-    msg: |
-      [FAIL DETAIL]
-      Host: {{ inventory_hostname }}
-      Script: {{ item.item.path | basename }}
-      rc: {{ item.rc }}
-
-      ---- stdout ----
-      {{ item.stdout | default('') }}
-
-      ---- stderr ----
-      {{ item.stderr | default('') }}
-  loop: "{{ fail_list }}"
-  when: fail_cnt | int > 0
-
-# 최종 요약 출력
 - name: Print final summary
   debug:
     msg: |
       [SUMMARY] Host={{ inventory_hostname }}
-      - total: {{ total_cnt }}
-      - ok(✅): {{ ok_cnt }}
-      - manual(⚠️): {{ manual_cnt }}
-      - fail(❌): {{ fail_cnt }}
-      - remote_log: {{ remote_log_file }}
+      - total: {{ total_count }}
+      - ok(✅): {{ ok_count }}
+      - manual(⚠️): {{ manual_count }}
+      - fail(❌): {{ fail_count }}
+      - remote_log: {{ remote_log }}
 
-# (선택) 로그 파일을 컨트롤 노드로 가져오기
-# 기존 네 fetch 로직을 유지하고 싶으면 아래 대신 기존 블록 그대로 써도 됨.
-- name: Fetch this run log to control node
-  fetch:
-    src: "{{ remote_log_file }}"
-    dest: "./collected_logs/{{ inventory_hostname }}/"
-    flat: yes
+# 실패 출력(콘솔) - FAIL만
+- name: Print failure outputs only
+  debug:
+    msg: |
+      [FAIL LIST] {{ fail_list }}
+  when: fail_count | int > 0
 
-# 끝까지 실행한 뒤 FAIL 있으면 플레이 실패 처리
+# FAIL이면 플레이 마지막에 fail 처리(운영 기준)
 - name: Fail play at end when failures exist
   fail:
-    msg: "There are failed items (fail={{ fail_cnt }}). Check log: {{ remote_log_file }}"
-  when: fail_cnt | int > 0
+    msg: "Security run has FAIL items: {{ fail_list }}"
+  when: fail_count | int > 0

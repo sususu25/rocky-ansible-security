@@ -1,0 +1,64 @@
+# playbooks/roles/security_script/vars/main.yml
+
+manual_guides:
+  "U-07.sh":
+    title: "불필요한 사용자 계정 점검 (운영/업무 계정 수동 판단)"
+    why: "환경별 운영계정이 달라 자동 삭제 시 장애 위험"
+    next:
+      - "미사용 계정 삭제: userdel <계정명>"
+      - "홈 포함 삭제: userdel -r <계정명>"
+    evidence:
+      - "cat /etc/passwd | awk -F: '$3>=1000 {print $1,$3,$6,$7}'"
+
+  "U-09.sh":
+    title: "불필요한 그룹 점검 (기본/서비스 그룹 포함 가능)"
+    why: "구성원 없는 기본그룹/서비스그룹이 있을 수 있어 자동 삭제 위험"
+    next:
+      - "미사용 그룹 삭제: groupdel <groupname>"
+      - "그룹 사용처 확인: grep -R \"<groupname>\" /etc 2>/dev/null"
+    evidence:
+      - "getent group"
+
+  "U-23.sh":
+    title: "SUID/SGID 설정 파일 점검 (sudo 권한 비표준)"
+    why: "sudo 권한/퍼미션 변경은 운영 승인 필요(패키지 무결성 영향)"
+    next:
+      - "무결성 점검: rpm -V sudo"
+      - "(승인 후) 권한 복구: rpm --setperms sudo"
+      - "(승인 후) 재설치: dnf reinstall -y sudo"
+      - "현재 권한 확인: stat -c '%a %U:%G %n' /usr/bin/sudo"
+    evidence:
+      - "ls -l /usr/bin/sudo"
+      - "rpm -q sudo"
+
+  "U-26.sh":
+    title: "/dev 디렉터리 내 일반 파일 점검"
+    why: "/dev 내 일반 파일은 정상/비정상 판단이 시스템 구성에 따라 달라 수동 검토 필요"
+    next:
+      - "일반 파일 확인: find /dev -xdev -type f -ls"
+      - "정상 장치가 아닌 파일이면 삭제/조치(승인 후): rm -f <file>"
+    evidence:
+      - "find /dev -xdev -type f -ls"
+
+  "U-28.sh":
+    title: "접근 통제(방화벽/iptables) 정책"
+    why: "허용 포트/허용 IP는 납품/운영 정책에 종속 → 자동 적용 시 접속 끊김 위험"
+    next:
+      - "현재 서비스 포트 파악: ss -lntup"
+      - "정책 확정 후 firewalld/iptables 룰 적용"
+      - "예: firewalld(승인 후): firewall-cmd --permanent --add-service=ssh && firewall-cmd --reload"
+    evidence:
+      - "systemctl is-active firewalld; systemctl is-enabled firewalld"
+      - "iptables -S; iptables -L -n -v"
+
+  "U-64.sh":
+    title: "OS/Kernel 보안 업데이트 점검"
+    why: "업데이트는 서비스 영향/재부팅 가능 → 운영 승인 필요"
+    next:
+      - "보안 업데이트 적용(승인 후): dnf update -y --security"
+      - "커널 제외(선택): dnf update -y --security --exclude=kernel*"
+      - "적용 전 영향 확인: dnf updateinfo list security"
+    evidence:
+      - "cat /etc/os-release"
+      - "uname -r"
+      - "dnf updateinfo list security | head"
