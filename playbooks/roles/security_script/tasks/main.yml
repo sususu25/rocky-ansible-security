@@ -82,6 +82,31 @@
   register: run_results
   ignore_errors: true
 
+# (A) 원격에서 로그 파일 찾기
+- name: Find vuln_fix logs
+  become: true
+  find:
+    paths: /opt/security/logs
+    patterns: "vuln_fix_*.log"
+    file_type: file
+  register: fix_logs
+
+# (B) 없으면 경고만 (실패 안 시키기)
+- name: Warn if no logs found
+  debug:
+    msg: "No vuln_fix logs found in /opt/security/logs"
+  when: fix_logs.matched | int == 0
+
+# (C) 있으면 최신 1개만 가져오기
+- name: Fetch latest vuln_fix log
+  become: true
+  fetch:
+    src: "{{ (fix_logs.files | sort(attribute='mtime'))[-1].path }}"
+    dest: "./fetched_logs/"
+    flat: true
+  when: fix_logs.matched | int > 0
+
+
 # rc 기반으로 리스트 분류
 - name: Classify results (OK/MANUAL/FAIL)
   set_fact:
