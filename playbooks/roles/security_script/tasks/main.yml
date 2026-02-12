@@ -5,7 +5,7 @@
   command: sudo -n true
   changed_when: false
 
-- name: Ensure fix and log directories exist
+- name: Ensure fix and log directories exist (per-host log dir)
   become: yes
   file:
     path: "{{ item }}"
@@ -13,7 +13,7 @@
     mode: "0755"
   loop:
     - /opt/security/fixes
-    - /opt/security/logs
+    - "/opt/security/logs/{{ inventory_hostname }}"
 
 - name: Copy fixes directory
   become: yes
@@ -22,14 +22,17 @@
     dest: /opt/security/fixes/
     mode: "0755"
 
-- name: Set remote log file path
+# remote_log: 호스트별 폴더 + (컨트롤노드 기준 시간이라도 호스트폴더로 충돌 방지)
+- name: Set remote log file path (host-specific)
   set_fact:
-    remote_log: "/opt/security/logs/vuln_fix_{{ lookup('pipe','date +%Y%m%d_%H%M%S') }}.log"
+    remote_log: "/opt/security/logs/{{ inventory_hostname }}/vuln_fix_{{ lookup('pipe','date +%Y%m%d_%H%M%S') }}.log"
 
 - name: Init remote log header
   become: yes
   shell: |
     echo "[{{ lookup('pipe','date -u +%Y-%m-%dT%H:%M:%SZ') }}] ===== Ansible security run start =====" > "{{ remote_log }}"
+    echo "Host={{ inventory_hostname }}" >> "{{ remote_log }}"
+    echo "" >> "{{ remote_log }}"
   args:
     executable: /bin/bash
 
@@ -53,6 +56,9 @@
     fail_list: []
     manual_blocks: []
 
+# 스크립트 실행: 각 item별로 remote_log에만 기록
+# - Ansible 콘솔에는 task 결과(ok/changed/failed 등)만 보이게 하고,
+# - ignore_errors:true로 끝까지 돌리면서 rc만 수집
 - name: Run each fix script sequentially (do not stop on failure)
   become: yes
   shell: |
@@ -79,32 +85,11 @@
   args:
     executable: /bin/bash
   loop: "{{ fix_list }}"
+  loop_control:
+    label: "{{ item | basename }}"
   register: run_results
   ignore_errors: true
-
-# (A) 원격에서 로그 파일 찾기
-- name: Find vuln_fix logs
-  become: true
-  find:
-    paths: /opt/security/logs
-    patterns: "vuln_fix_*.log"
-    file_type: file
-  register: fix_logs
-
-# (B) 없으면 경고만 (실패 안 시키기)
-- name: Warn if no logs found
-  debug:
-    msg: "No vuln_fix logs found in /opt/security/logs"
-  when: fix_logs.matched | int == 0
-
-# (C) 있으면 최신 1개만 가져오기
-- name: Fetch latest vuln_fix log
-  become: true
-  fetch:
-    src: "{{ (fix_logs.files | sort(attribute='mtime'))[-1].path }}"
-    dest: "./fetched_logs/"
-    flat: true
-  when: fix_logs.matched | int > 0
+  failed_when: false
 
 
 # rc 기반으로 리스트 분류
@@ -124,9 +109,10 @@
   set_fact:
     fail_list: "{{ fail_list + [item.item | basename] }}"
   loop: "{{ run_results.results }}"
-  when: (item.rc | default(1)) not in [0,2]
+  when: (item.rc | default(1)) not in [0, 2]
 
 # MANUAL 항목에 대한 가이드 블록 만들기
+# manual_guides 는 vars/ 또는 defaults/ 에 정의되어 있어야 함 (기존 그대로)
 - name: Build MANUAL ACTION blocks
   set_fact:
     manual_blocks: "{{ manual_blocks + [ block ] }}"
@@ -148,8 +134,12 @@
       {% endfor %}
       ──────────────────────────────────────────────
   loop: "{{ manual_list }}"
+  loop_control:
+    label: "{{ item }}"
 
-# MANUAL이면 “즉시” 원격 로그에 블록 append
+# ✅ YAML 깨지던 EOF 문제 해결 버전
+# - Jinja 렌더링이 "shell 바디" 안에서 끝나고,
+# - heredoc(EOF)은 순수 쉘로만 처리
 - name: Append MANUAL ACTION blocks to remote log
   become: yes
   shell: |
@@ -162,6 +152,7 @@
   args:
     executable: /bin/bash
   when: manual_blocks | length > 0
+  changed_when: false
 
 # 카운트/요약
 - name: Compute result counts (OK/MANUAL/FAIL)
@@ -181,7 +172,32 @@
       - fail(❌): {{ fail_count }}
       - remote_log: {{ remote_log }}
 
-# 실패 출력(콘솔) - FAIL만
+# (A) 원격에서 로그 파일 찾기 (호스트별 폴더에서만)
+- name: Find vuln_fix logs (per-host folder)
+  become: true
+  find:
+    paths: "/opt/security/logs/{{ inventory_hostname }}"
+    patterns: "vuln_fix_*.log"
+    file_type: file
+  register: fix_logs
+
+# (B) 없으면 경고만 (실패 안 시키기)
+- name: Warn if no logs found
+  debug:
+    msg: "No vuln_fix logs found in /opt/security/logs/{{ inventory_hostname }}"
+  when: fix_logs.matched | int == 0
+
+# (C) 있으면 최신 1개만 가져오기 (로컬도 호스트별 폴더)
+- name: Fetch latest vuln_fix log (per-host local folder)
+  become: true
+  fetch:
+    src: "{{ (fix_logs.files | sort(attribute='mtime'))[-1].path }}"
+    dest: "./fetched_logs/{{ inventory_hostname }}/"
+    flat: true
+  when: fix_logs.matched | int > 0
+  changed_when: false
+
+# 실패 출력(콘솔) - FAIL만 (내용은 로그에 있으니 리스트만)
 - name: Print failure outputs only
   debug:
     msg: |
