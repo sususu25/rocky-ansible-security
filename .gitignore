@@ -3,5 +3,6 @@
 inventory/hosts.ini
 ansible.cfg
 
+fetched_logs/
 collected_logs/
 *.log
