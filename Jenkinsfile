@@ -4,90 +4,79 @@ pipeline {
   options {
     timestamps()
     disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
   }
 
   parameters {
-    // -----------------------------
-    // 1) 실행 모드
-    // -----------------------------
-    choice(
-      name: 'RUN_MODE',
-      choices: ['audit', 'enforce'],
-      description: 'audit=점검만 / enforce=조치 실행'
-    )
-
-    // -----------------------------
-    // 2) 인벤토리 입력 방식
-    // -----------------------------
+    // 인벤토리 생성 방식
     choice(
       name: 'INVENTORY_MODE',
-      choices: ['manual', 'tf_artifact'],
-      description: 'manual=UI에서 직접 입력 / tf_artifact=Terraform Job의 tf_output.json 사용'
+      choices: ['tf_artifact', 'manual'],
+      description: 'tf_artifact: Terraform Job의 tf_output.json 사용 / manual: 수기 입력'
     )
 
-    // -----------------------------
-    // 3) 수동 입력 모드용 파라미터
-    // -----------------------------
+    // Terraform 아티팩트 가져올 때 기준 Job
     string(
-      name: 'BASTION_IP',
-      defaultValue: '',
-      description: 'INVENTORY_MODE=manual일 때 bastion 공인 IP (예: 133.186.xxx.xxx)'
-    )
-
-    text(
-      name: 'TARGET_PRIVATE_IPS',
-      defaultValue: '',
-      description: '''INVENTORY_MODE=manual일 때 대상 서버 private IP 입력
-예시(쉼표/공백/줄바꿈 모두 가능):
-10.0.2.45,10.0.2.36
-또는
-10.0.2.45
-10.0.2.36'''
-    )
-
-    // -----------------------------
-    // 4) Terraform 아티팩트 모드용 파라미터
-    // -----------------------------
-    string(
-      name: 'TF_JOB_NAME',
+      name: 'TERRAFORM_JOB_NAME',
       defaultValue: 'Terraform Job',
-      description: 'tf_output.json을 가져올 Terraform Jenkins Job 이름'
+      description: 'Terraform 파이프라인 Job 이름 (tf_artifact 모드에서 사용)'
     )
 
+    // 수기 입력 모드용 (manual)
     string(
-      name: 'TF_BUILD_NUMBER',
+      name: 'BASTION_HOST',
       defaultValue: '',
-      description: '비우면 마지막 성공 빌드(lastSuccessful), 숫자 입력 시 해당 빌드번호에서 가져옴'
+      description: 'manual 모드에서 bastion 공인 IP/FQDN (예: 133.x.x.x)'
     )
-
-    // -----------------------------
-    // 5) Git 브랜치 / 실행 옵션
-    // -----------------------------
-    string(
-      name: 'GIT_BRANCH',
-      defaultValue: 'main',
-      description: 'Ansible 레포에서 checkout할 브랜치명 (예: feature/xxx)'
-    )
-
-    string(
-      name: 'ANSIBLE_LIMIT',
+    text(
+      name: 'TARGET_HOSTS',
       defaultValue: '',
-      description: '선택: 특정 호스트만 실행하고 싶을 때 (예: rocky-01)'
+      description: 'manual 모드에서 대상 서버 private IP 목록 (줄바꿈 구분)\n예:\n10.0.2.45\n10.0.2.36'
+    )
+
+    // 실행 관련
+    choice(
+      name: 'RUN_MODE',
+      choices: ['fix', 'check'],
+      description: '현재 브랜치가 조치 스크립트 중심이면 fix 사용 (check는 향후 확장용)'
+    )
+
+    string(
+      name: 'ANSIBLE_BRANCH',
+      defaultValue: 'feature/simple-execution',
+      description: '체크아웃할 Ansible 레포 브랜치 (Job 설정 브랜치와 달라도 이 값 우선)'
+    )
+
+    string(
+      name: 'PLAYBOOK_PATH',
+      defaultValue: 'playbooks/security_check.yml',
+      description: '실행할 playbook 경로'
+    )
+
+    string(
+      name: 'SSH_CREDENTIALS_ID',
+      defaultValue: 'bastion-ssh-key',
+      description: 'Jenkins SSH Username with private key Credential ID'
+    )
+
+    string(
+      name: 'SSH_USER',
+      defaultValue: 'rocky',
+      description: '대상/배스천 SSH 사용자'
     )
 
     booleanParam(
-      name: 'DRY_PING_ONLY',
-      defaultValue: false,
-      description: 'true면 ansible ping 테스트까지만 수행하고 플레이북은 실행하지 않음'
+      name: 'DO_PING_TEST',
+      defaultValue: true,
+      description: '플레이북 실행 전 ansible ping 테스트 수행'
     )
   }
 
   environment {
-    // Jenkins에 등록된 SSH Credential ID (SSH Username with private key)
-    SSH_CRED_ID = 'bastion-ssh-key'
     GENERATED_DIR = 'generated'
-    GENERATED_INVENTORY = 'generated/hosts.runtime.ini'
-    GENERATED_TF_JSON = 'generated/tf_output.json'
+    COLLECTED_LOGS_DIR = 'collected_logs'
+    TF_JSON_PATH = 'generated/tf_output.json'
+    RUNTIME_INVENTORY = 'generated/hosts.ini'
   }
 
   stages {
@@ -95,7 +84,7 @@ pipeline {
       steps {
         checkout([
           $class: 'GitSCM',
-          branches: [[name: "*/${params.GIT_BRANCH}"]],
+          branches: [[name: "*/${params.ANSIBLE_BRANCH}"]],
           userRemoteConfigs: [[url: 'https://github.com/sususu25/rocky-ansible-security.git']]
         ])
       }
@@ -105,22 +94,12 @@ pipeline {
       steps {
         script {
           if (params.INVENTORY_MODE == 'manual') {
-            if (!params.BASTION_IP?.trim()) {
-              error("INVENTORY_MODE=manual 인데 BASTION_IP가 비어있습니다.")
+            if (!params.BASTION_HOST?.trim()) {
+              error("manual 모드에서는 BASTION_HOST 필수")
             }
-            if (!params.TARGET_PRIVATE_IPS?.trim()) {
-              error("INVENTORY_MODE=manual 인데 TARGET_PRIVATE_IPS가 비어있습니다.")
+            if (!params.TARGET_HOSTS?.trim()) {
+              error("manual 모드에서는 TARGET_HOSTS 필수 (줄바꿈으로 여러 개 입력)")
             }
-          }
-
-          if (params.INVENTORY_MODE == 'tf_artifact') {
-            if (!params.TF_JOB_NAME?.trim()) {
-              error("INVENTORY_MODE=tf_artifact 인데 TF_JOB_NAME이 비어있습니다.")
-            }
-          }
-
-          if (!(params.RUN_MODE in ['audit', 'enforce'])) {
-            error("RUN_MODE는 audit 또는 enforce 여야 합니다.")
           }
         }
       }
@@ -130,8 +109,8 @@ pipeline {
       steps {
         sh '''
           set -e
-          mkdir -p "${GENERATED_DIR}"
-          mkdir -p collected_logs
+          mkdir -p "$GENERATED_DIR"
+          mkdir -p "$COLLECTED_LOGS_DIR"
           echo "Workspace prepared"
         '''
       }
@@ -143,124 +122,76 @@ pipeline {
       }
       steps {
         script {
-          if (params.TF_BUILD_NUMBER?.trim()) {
-            // 특정 빌드 번호에서 가져오기
-            copyArtifacts(
-              projectName: params.TF_JOB_NAME,
-              selector: specific(params.TF_BUILD_NUMBER.trim()),
-              filter: 'tf_output.json',
-              target: env.GENERATED_DIR,
-              flatten: true
-            )
-          } else {
-            // 마지막 성공 빌드에서 가져오기
-            copyArtifacts(
-              projectName: params.TF_JOB_NAME,
-              selector: lastSuccessful(),
-              filter: 'tf_output.json',
-              target: env.GENERATED_DIR,
-              flatten: true
-            )
-          }
+          // Copy Artifact Plugin 필요
+          // lastSuccessful() 대신 현재 Jenkins 심볼에 맞는 lastSuccess() 사용
+          step([
+            $class: 'CopyArtifact',
+            projectName: params.TERRAFORM_JOB_NAME,
+            selector: lastSuccess(),
+            filter: 'tf_output.json',
+            target: env.GENERATED_DIR,
+            flatten: true
+          ])
 
-          sh '''
-            set -e
-            test -f "${GENERATED_TF_JSON}"
-            echo "Fetched tf_output.json:"
-            ls -l "${GENERATED_TF_JSON}"
-          '''
+          if (!fileExists(env.TF_JSON_PATH)) {
+            error("tf_output.json 복사 실패: ${env.TF_JSON_PATH} 파일 없음")
+          }
         }
       }
     }
 
     stage('Generate Runtime Inventory') {
       steps {
-        withCredentials([
-          sshUserPrivateKey(
-            credentialsId: env.SSH_CRED_ID,
-            keyFileVariable: 'SSH_KEY_FILE',
-            usernameVariable: 'SSH_USER'
-          )
-        ]) {
-          script {
-            def bastionIp = ''
-            def targetIps = []
+        script {
+          if (params.INVENTORY_MODE == 'tf_artifact') {
+            def tf = readJSON file: env.TF_JSON_PATH
 
-            if (params.INVENTORY_MODE == 'manual') {
-              bastionIp = params.BASTION_IP.trim()
+            def bastionHost = tf?.bastion_fip?.value
+            def backendMap  = tf?.backend_mgmt_private_ips?.value
 
-              // 쉼표/공백/줄바꿈 모두 허용
-              targetIps = params.TARGET_PRIVATE_IPS
-                .split(/[\\s,]+/)
-                .collect { it.trim() }
-                .findAll { it }
-
-            } else {
-              // tf_output.json 파싱
-              def tfRaw = readFile(file: env.GENERATED_TF_JSON)
-              def tf = new groovy.json.JsonSlurperClassic().parseText(tfRaw)
-
-              bastionIp = tf?.bastion_fip?.value?.toString()?.trim()
-
-              def backendMap = tf?.backend_mgmt_private_ips?.value
-              if (!backendMap || !(backendMap instanceof Map)) {
-                error("tf_output.json에서 backend_mgmt_private_ips.value(map)를 찾지 못했습니다.")
-              }
-
-              targetIps = backendMap.values()
-                .collect { it.toString().trim() }
-                .findAll { it }
-
-              if (!bastionIp) {
-                error("tf_output.json에서 bastion_fip.value를 찾지 못했습니다.")
-              }
+            if (!bastionHost) {
+              error("tf_output.json에서 bastion_fip.value를 찾지 못함")
+            }
+            if (!(backendMap instanceof Map) || backendMap.isEmpty()) {
+              error("tf_output.json에서 backend_mgmt_private_ips.value를 찾지 못했거나 비어있음")
             }
 
-            if (!bastionIp) {
-              error("Bastion IP가 비어 있습니다.")
+            def lines = []
+            lines << "[rocky_servers]"
+            backendMap.each { name, ip ->
+              // ProxyJump 사용 (젠킨스 -> bastion -> 대상)
+              lines << "${name} ansible_host=${ip} ansible_user=${params.SSH_USER} " +
+                      "ansible_ssh_common_args='-o ProxyJump=${params.SSH_USER}@${bastionHost} -o StrictHostKeyChecking=no'"
             }
-            if (!targetIps || targetIps.size() == 0) {
-              error("대상 서버 IP가 비어 있습니다.")
+            lines << ""
+            lines << "[rocky_servers:vars]"
+            lines << "ansible_become=true"
+            lines << "ansible_become_method=sudo"
+            lines << "ansible_become_user=root"
+
+            writeFile file: env.RUNTIME_INVENTORY, text: lines.join("\n") + "\n"
+          } else {
+            // manual 모드
+            def bastionHost = params.BASTION_HOST.trim()
+            def targets = params.TARGET_HOSTS
+              .split("\\r?\\n")
+              .collect { it.trim() }
+              .findAll { it }
+
+            def lines = []
+            lines << "[rocky_servers]"
+            targets.eachWithIndex { ip, idx ->
+              def name = String.format("rocky%02d", idx + 1)
+              lines << "${name} ansible_host=${ip} ansible_user=${params.SSH_USER} " +
+                      "ansible_ssh_common_args='-o ProxyJump=${params.SSH_USER}@${bastionHost} -o StrictHostKeyChecking=no'"
             }
+            lines << ""
+            lines << "[rocky_servers:vars]"
+            lines << "ansible_become=true"
+            lines << "ansible_become_method=sudo"
+            lines << "ansible_become_user=root"
 
-            // 중복 제거 (순서 유지)
-            def uniqueTargetIps = []
-            targetIps.each { ip ->
-              if (!uniqueTargetIps.contains(ip)) {
-                uniqueTargetIps << ip
-              }
-            }
-
-            // host 이름 자동 생성 rocky-01 ~ n
-            def hostLines = []
-            for (int i = 0; i < uniqueTargetIps.size(); i++) {
-              def idx = i + 1
-              def hostName = String.format("rocky-%02d", idx)
-              hostLines << "${hostName} ansible_host=${uniqueTargetIps[i]}"
-            }
-
-            // ProxyCommand 구성 (같은 키로 bastion -> backend)
-            // %h, %p 는 원격 호스트/포트
-            def proxyCmd = "-o ProxyCommand=\\\"ssh -W %h:%p -o StrictHostKeyChecking=no -i ${SSH_KEY_FILE} ${SSH_USER}@${bastionIp}\\\""
-
-            def inventoryContent = """[rocky_servers]
-${hostLines.join('\n')}
-
-[rocky_servers:vars]
-ansible_user=${SSH_USER}
-ansible_ssh_private_key_file=${SSH_KEY_FILE}
-ansible_become=true
-ansible_become_method=sudo
-ansible_become_user=root
-ansible_ssh_common_args=${proxyCmd}
-"""
-
-            writeFile(file: env.GENERATED_INVENTORY, text: inventoryContent)
-
-            echo "Generated inventory => ${env.GENERATED_INVENTORY}"
-            echo "Bastion IP => ${bastionIp}"
-            echo "Target count => ${uniqueTargetIps.size()}"
-            echo "Targets => ${uniqueTargetIps.join(', ')}"
+            writeFile file: env.RUNTIME_INVENTORY, text: lines.join("\n") + "\n"
           }
         }
       }
@@ -269,58 +200,43 @@ ansible_ssh_common_args=${proxyCmd}
     stage('Show Inventory (sanity check)') {
       steps {
         sh '''
-          set -e
-          echo "===== Generated Inventory ====="
-          cat "${GENERATED_INVENTORY}"
-          echo "==============================="
+          echo "===== Runtime Inventory ====="
+          cat "$RUNTIME_INVENTORY"
+          echo "============================="
         '''
       }
     }
 
-    stage('Ansible Ping Test') {
+    stage('Ansible Version Check') {
       steps {
-        withCredentials([
-          sshUserPrivateKey(
-            credentialsId: env.SSH_CRED_ID,
-            keyFileVariable: 'SSH_KEY_FILE',
-            usernameVariable: 'SSH_USER'
-          )
-        ]) {
-          script {
-            def limitOpt = params.ANSIBLE_LIMIT?.trim() ? "--limit '${params.ANSIBLE_LIMIT.trim()}'" : ""
-            sh """
-              set -e
-              export ANSIBLE_HOST_KEY_CHECKING=False
-              ansible --version
-              ansible -i '${env.GENERATED_INVENTORY}' rocky_servers -m ping ${limitOpt}
-            """
-          }
+        sh 'ansible --version'
+      }
+    }
+
+    stage('Ansible Ping Test') {
+      when {
+        expression { return params.DO_PING_TEST }
+      }
+      steps {
+        sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
+          sh '''
+            set -e
+            ansible all -i "$RUNTIME_INVENTORY" -m ping
+          '''
         }
       }
     }
 
     stage('Run Playbook') {
-      when {
-        expression { return !params.DRY_PING_ONLY }
-      }
       steps {
-        withCredentials([
-          sshUserPrivateKey(
-            credentialsId: env.SSH_CRED_ID,
-            keyFileVariable: 'SSH_KEY_FILE',
-            usernameVariable: 'SSH_USER'
-          )
-        ]) {
-          script {
-            def playbookFile = (params.RUN_MODE == 'audit') ? 'playbooks/security_audit.yml' : 'playbooks/security_check.yml'
-            def limitOpt = params.ANSIBLE_LIMIT?.trim() ? "--limit '${params.ANSIBLE_LIMIT.trim()}'" : ""
+        sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
+          sh '''
+            set -e
 
-            sh """
-              set -e
-              export ANSIBLE_HOST_KEY_CHECKING=False
-              ansible-playbook -i '${env.GENERATED_INVENTORY}' '${playbookFile}' ${limitOpt}
-            """
-          }
+            # 필요 시 RUN_MODE를 extra-vars로 넘겨서 플레이북/롤 내부에서 분기 가능
+            ansible-playbook -i "$RUNTIME_INVENTORY" "$PLAYBOOK_PATH" \
+              -e "run_mode=${RUN_MODE}" | tee "${COLLECTED_LOGS_DIR}/ansible_run.log"
+          '''
         }
       }
     }
@@ -328,7 +244,7 @@ ansible_ssh_common_args=${proxyCmd}
 
   post {
     always {
-      archiveArtifacts artifacts: 'generated/**,collected_logs/**', allowEmptyArchive: true
+      archiveArtifacts artifacts: 'generated/**, collected_logs/**', allowEmptyArchive: true
       echo '🧹 Pipeline finished'
     }
     success {
