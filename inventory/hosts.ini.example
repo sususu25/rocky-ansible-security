@@ -1,5 +1,6 @@
 # Ansible Inventory Example
 # 이 파일을 복사해서 hosts.ini 파일을 만들고 실제 값으로 수정하세요
+# 다만, 젠킨스 파이프라인을 사용할 경우 hosts.ini 파일은 사용하지 않습니다
 
 [rocky_servers]
 # 호스트명 또는 IP와 실제 접속 IP 주소
@@ -10,7 +11,7 @@ rocky01 ansible_host=YOUR_INSTANCE_IP
 ansible_user=rocky
 
 # SSH 프라이빗 키 파일 경로
-ansible_ssh_private_key_file=~/.ssh/YOUR_KEY.pem
+ansible_ssh_private_key_file=~/.ssh/YOUR_KEY.pem   
 
 # 권한 상승 활성화 (루트 권한 필요)
 ansible_become=true
