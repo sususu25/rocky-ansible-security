@@ -1,6 +1,9 @@
 # Ansible Inventory Example
 # 이 파일을 복사해서 hosts.ini 파일을 만들고 실제 값으로 수정하세요
-# 다만, 젠킨스 파이프라인을 사용할 경우 hosts.ini 파일은 사용하지 않습니다
+# <MANUAL> 혹은 <JENKINS> 모드 둘 중 하나만 사용합니다.
+
+
+# <MANUAL>
 
 [rocky_servers]
 # 호스트명 또는 IP와 실제 접속 IP 주소
@@ -10,8 +13,31 @@ rocky01 ansible_host=YOUR_INSTANCE_IP
 # SSH 접속할 사용자명
 ansible_user=rocky
 
-# SSH 프라이빗 키 파일 경로
+# SSH 프라이빗 키 파일 경로 
 ansible_ssh_private_key_file=~/.ssh/YOUR_KEY.pem   
+
+# 권한 상승 활성화 (루트 권한 필요)
+ansible_become=true
+
+# 권한 상승 방법 (sudo 사용)
+ansible_become_method=sudo
+
+# 권한 상승 대상 사용자 (root)
+ansible_become_user=root
+
+
+# <JENKINS>
+
+[rocky_servers]
+# 호스트명 또는 IP와 실제 접속 IP 주소
+rocky01 ansible_host=YOUR_INSTANCE_IP
+
+[rocky_servers:vars]
+# SSH 접속할 사용자명
+ansible_user=rocky
+
+# SSH 배스천 서버 접속 - 대상 서버에 공인 IP 붙어있어 배스천 경유 안 할 경우 사용하지 않음
+ansible_ssh_common_args='-o ProxyJump=rocky@YOUR_BASTION_IP -o StrictHostKeyChecking=no'
 
 # 권한 상승 활성화 (루트 권한 필요)
 ansible_become=true
