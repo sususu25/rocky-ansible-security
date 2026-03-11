@@ -8,21 +8,18 @@ pipeline {
   }
 
   parameters {
-    // 인벤토리 입력 방식
     choice(
       name: 'INVENTORY_MODE',
       choices: ['uploaded_inventory', 'manual'],
       description: 'uploaded_inventory: Jenkins File Credential의 hosts.ini 사용 / manual: bastion+target 수기 입력'
     )
 
-    // uploaded_inventory 모드용
     string(
       name: 'INVENTORY_CREDENTIALS_ID',
       defaultValue: 'ansible-inventory',
       description: 'uploaded_inventory 모드에서 사용할 Jenkins File Credential ID (hosts.ini)'
     )
 
-    // manual 모드용
     string(
       name: 'BASTION_HOST',
       defaultValue: '',
@@ -35,7 +32,6 @@ pipeline {
       description: 'manual 모드에서 대상 서버 private IP 목록 (줄바꿈 구분)\n예:\n10.0.2.45\n10.0.2.36'
     )
 
-    // 실행 관련
     choice(
       name: 'RUN_MODE',
       choices: ['fix', 'check'],
@@ -131,11 +127,12 @@ pipeline {
               sh '''
                 set -e
                 cp "$SRC_INVENTORY" "$RUNTIME_INVENTORY"
+                # Windows CRLF 제거
+                sed -i 's/\r$//' "$RUNTIME_INVENTORY"
                 echo "uploaded inventory copied to $RUNTIME_INVENTORY"
               '''
             }
           } else {
-            // manual 모드
             def bastionHost = params.BASTION_HOST.trim()
             def targets = params.TARGET_HOSTS
               .split("\\r?\\n")
@@ -186,38 +183,21 @@ pipeline {
           chmod 700 /var/lib/jenkins/.ssh
           : > "$KNOWN_HOSTS_FILE"
 
-          # rocky_servers 그룹의 ansible_host 값 추출
-          awk '
-            BEGIN { in_group=0 }
-            /^\\[rocky_servers\\]/ { in_group=1; next }
-            /^\\[/ && $0 !~ /^\\[rocky_servers\\]/ { in_group=0 }
-            in_group && $0 !~ /^#/ && NF {
-              for (i=1; i<=NF; i++) {
-                if ($i ~ /^ansible_host=/) {
-                  split($i, a, "=")
-                  print a[2]
-                }
-              }
-            }
-          ' "$RUNTIME_INVENTORY" | sort -u > /tmp/target_hosts.txt
+          # CRLF 제거 한 번 더 보장
+          sed -i 's/\r$//' "$RUNTIME_INVENTORY"
 
-          # ansible_ssh_common_args에서 ProxyJump 대상 추출
+          # bastion host만 inventory에서 추출
           grep '^ansible_ssh_common_args=' "$RUNTIME_INVENTORY" \
             | sed -n "s/.*ProxyJump=[^@]*@\\([^ ']*\\).*/\\1/p" \
+            | tr -d '\r' \
             | sort -u > /tmp/bastion_hosts.txt
 
           echo "===== Parsed bastion hosts ====="
           cat /tmp/bastion_hosts.txt || true
-          echo "===== Parsed target hosts ====="
-          cat /tmp/target_hosts.txt || true
 
           while read -r host; do
             [ -n "$host" ] && ssh-keyscan -H "$host" >> "$KNOWN_HOSTS_FILE"
           done < /tmp/bastion_hosts.txt
-
-          while read -r host; do
-            [ -n "$host" ] && ssh-keyscan -H "$host" >> "$KNOWN_HOSTS_FILE"
-          done < /tmp/target_hosts.txt
 
           chmod 600 "$KNOWN_HOSTS_FILE"
 
@@ -245,7 +225,7 @@ pipeline {
             cat "$RUNTIME_INVENTORY"
             echo "============================="
 
-            BASTION_HOST=$(grep '^ansible_ssh_common_args=' "$RUNTIME_INVENTORY" | sed -n "s/.*ProxyJump=[^@]*@\\([^ ']*\\).*/\\1/p" | head -n1)
+            BASTION_HOST=$(grep '^ansible_ssh_common_args=' "$RUNTIME_INVENTORY" | sed -n "s/.*ProxyJump=[^@]*@\\([^ ']*\\).*/\\1/p" | tr -d '\r' | head -n1)
             TARGET_HOST=$(awk '
               BEGIN { in_group=0 }
               /^\\[rocky_servers\\]/ { in_group=1; next }
@@ -254,6 +234,7 @@ pipeline {
                 for (i=1; i<=NF; i++) {
                   if ($i ~ /^ansible_host=/) {
                     split($i, a, "=")
+                    gsub("\\r", "", a[2])
                     print a[2]
                     exit
                   }
@@ -278,7 +259,7 @@ pipeline {
             echo "=========================================="
 
             echo "===== Ansible Ping ====="
-            ANSIBLE_HOST_KEY_CHECKING=True ansible all -i "$RUNTIME_INVENTORY" -m ping -vvvv
+            ANSIBLE_HOST_KEY_CHECKING=False ansible all -i "$RUNTIME_INVENTORY" -m ping -vvvv
           '''
         }
       }
@@ -289,7 +270,7 @@ pipeline {
         sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
           sh '''
             set -e
-            ANSIBLE_HOST_KEY_CHECKING=True ansible-playbook -i "$RUNTIME_INVENTORY" "$PLAYBOOK_PATH" \
+            ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$RUNTIME_INVENTORY" "$PLAYBOOK_PATH" \
               -e "run_mode=${RUN_MODE}" | tee "${COLLECTED_LOGS_DIR}/ansible_run.log"
           '''
         }
