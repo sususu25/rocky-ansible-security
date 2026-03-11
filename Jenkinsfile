@@ -184,7 +184,23 @@ pipeline {
         sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
           sh '''
             set -e
-            ansible all -i "$RUNTIME_INVENTORY" -m ping
+
+            echo "===== Loaded SSH keys in agent ====="
+            ssh-add -l || true
+            echo "===================================="
+
+            echo "===== Runtime Inventory ====="
+            cat "$RUNTIME_INVENTORY"
+            echo "============================="
+
+            echo "===== Direct SSH test via ProxyJump ====="
+            ssh -vvv -o StrictHostKeyChecking=no \
+              -J rocky@133.186.215.141 \
+              rocky@10.0.2.34 "hostname" || true
+            echo "=========================================="
+
+            echo "===== Ansible Ping ====="
+            ansible all -i "$RUNTIME_INVENTORY" -m ping -vvvv
           '''
         }
       }
