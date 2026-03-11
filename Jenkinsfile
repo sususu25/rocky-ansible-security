@@ -77,6 +77,7 @@ pipeline {
     GENERATED_DIR = 'generated'
     COLLECTED_LOGS_DIR = 'collected_logs'
     RUNTIME_INVENTORY = 'generated/hosts.ini'
+    KNOWN_HOSTS_FILE = '/var/lib/jenkins/.ssh/known_hosts'
   }
 
   stages {
@@ -176,6 +177,57 @@ pipeline {
       }
     }
 
+    stage('Prepare SSH known_hosts') {
+      steps {
+        sh '''
+          set -e
+
+          mkdir -p /var/lib/jenkins/.ssh
+          chmod 700 /var/lib/jenkins/.ssh
+          : > "$KNOWN_HOSTS_FILE"
+
+          # rocky_servers 그룹의 ansible_host 값 추출
+          awk '
+            BEGIN { in_group=0 }
+            /^\\[rocky_servers\\]/ { in_group=1; next }
+            /^\\[/ && $0 !~ /^\\[rocky_servers\\]/ { in_group=0 }
+            in_group && $0 !~ /^#/ && NF {
+              for (i=1; i<=NF; i++) {
+                if ($i ~ /^ansible_host=/) {
+                  split($i, a, "=")
+                  print a[2]
+                }
+              }
+            }
+          ' "$RUNTIME_INVENTORY" | sort -u > /tmp/target_hosts.txt
+
+          # ansible_ssh_common_args에서 ProxyJump 대상 추출
+          grep '^ansible_ssh_common_args=' "$RUNTIME_INVENTORY" \
+            | sed -n "s/.*ProxyJump=[^@]*@\\([^ ']*\\).*/\\1/p" \
+            | sort -u > /tmp/bastion_hosts.txt
+
+          echo "===== Parsed bastion hosts ====="
+          cat /tmp/bastion_hosts.txt || true
+          echo "===== Parsed target hosts ====="
+          cat /tmp/target_hosts.txt || true
+
+          while read -r host; do
+            [ -n "$host" ] && ssh-keyscan -H "$host" >> "$KNOWN_HOSTS_FILE"
+          done < /tmp/bastion_hosts.txt
+
+          while read -r host; do
+            [ -n "$host" ] && ssh-keyscan -H "$host" >> "$KNOWN_HOSTS_FILE"
+          done < /tmp/target_hosts.txt
+
+          chmod 600 "$KNOWN_HOSTS_FILE"
+
+          echo "===== known_hosts ====="
+          cat "$KNOWN_HOSTS_FILE"
+          echo "======================="
+        '''
+      }
+    }
+
     stage('Ansible Ping Test') {
       when {
         expression { return params.DO_PING_TEST }
@@ -193,14 +245,40 @@ pipeline {
             cat "$RUNTIME_INVENTORY"
             echo "============================="
 
+            BASTION_HOST=$(grep '^ansible_ssh_common_args=' "$RUNTIME_INVENTORY" | sed -n "s/.*ProxyJump=[^@]*@\\([^ ']*\\).*/\\1/p" | head -n1)
+            TARGET_HOST=$(awk '
+              BEGIN { in_group=0 }
+              /^\\[rocky_servers\\]/ { in_group=1; next }
+              /^\\[/ && $0 !~ /^\\[rocky_servers\\]/ { in_group=0 }
+              in_group && $0 !~ /^#/ && NF {
+                for (i=1; i<=NF; i++) {
+                  if ($i ~ /^ansible_host=/) {
+                    split($i, a, "=")
+                    print a[2]
+                    exit
+                  }
+                }
+              }
+            ' "$RUNTIME_INVENTORY")
+
             echo "===== Direct SSH test via ProxyJump ====="
-            ssh -vvv -o StrictHostKeyChecking=no \
-              -J rocky@133.186.215.141 \
-              rocky@10.0.2.34 "hostname" || true
+            echo "BASTION_HOST=$BASTION_HOST"
+            echo "TARGET_HOST=$TARGET_HOST"
+
+            if [ -n "$BASTION_HOST" ] && [ -n "$TARGET_HOST" ]; then
+              ssh -vvv \
+                -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
+                -o StrictHostKeyChecking=yes \
+                -J "${SSH_USER}@${BASTION_HOST}" \
+                "${SSH_USER}@${TARGET_HOST}" "hostname" || true
+            else
+              echo "Skip direct SSH test: bastion or target host not found in inventory"
+            fi
+
             echo "=========================================="
 
             echo "===== Ansible Ping ====="
-            ansible all -i "$RUNTIME_INVENTORY" -m ping -vvvv
+            ANSIBLE_HOST_KEY_CHECKING=True ansible all -i "$RUNTIME_INVENTORY" -m ping -vvvv
           '''
         }
       }
@@ -211,7 +289,7 @@ pipeline {
         sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
           sh '''
             set -e
-            ansible-playbook -i "$RUNTIME_INVENTORY" "$PLAYBOOK_PATH" \
+            ANSIBLE_HOST_KEY_CHECKING=True ansible-playbook -i "$RUNTIME_INVENTORY" "$PLAYBOOK_PATH" \
               -e "run_mode=${RUN_MODE}" | tee "${COLLECTED_LOGS_DIR}/ansible_run.log"
           '''
         }
