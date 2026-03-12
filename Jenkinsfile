@@ -71,7 +71,7 @@ pipeline {
 
   environment {
     GENERATED_DIR = 'generated'
-    COLLECTED_LOGS_DIR = 'collected_logs'
+    LOGS_DIR = 'logs'
     RUNTIME_INVENTORY = 'generated/hosts.ini'
     KNOWN_HOSTS_FILE = '/var/lib/jenkins/.ssh/known_hosts'
   }
@@ -113,7 +113,7 @@ pipeline {
         sh '''
           set -e
           mkdir -p "$GENERATED_DIR"
-          mkdir -p "$COLLECTED_LOGS_DIR"
+          mkdir -p "$LOGS_DIR"
           echo "Workspace prepared"
         '''
       }
@@ -127,7 +127,6 @@ pipeline {
               sh '''
                 set -e
                 cp "$SRC_INVENTORY" "$RUNTIME_INVENTORY"
-                # Windows CRLF 제거
                 sed -i 's/\r$//' "$RUNTIME_INVENTORY"
                 echo "uploaded inventory copied to $RUNTIME_INVENTORY"
               '''
@@ -183,10 +182,8 @@ pipeline {
           chmod 700 /var/lib/jenkins/.ssh
           : > "$KNOWN_HOSTS_FILE"
 
-          # CRLF 제거 한 번 더 보장
           sed -i 's/\r$//' "$RUNTIME_INVENTORY"
 
-          # bastion host만 inventory에서 추출
           grep '^ansible_ssh_common_args=' "$RUNTIME_INVENTORY" \
             | sed -n "s/.*ProxyJump=[^@]*@\\([^ ']*\\).*/\\1/p" \
             | tr -d '\r' \
@@ -200,10 +197,6 @@ pipeline {
           done < /tmp/bastion_hosts.txt
 
           chmod 600 "$KNOWN_HOSTS_FILE"
-
-          echo "===== known_hosts ====="
-          cat "$KNOWN_HOSTS_FILE"
-          echo "======================="
         '''
       }
     }
@@ -216,50 +209,7 @@ pipeline {
         sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
           sh '''
             set -e
-
-            echo "===== Loaded SSH keys in agent ====="
-            ssh-add -l || true
-            echo "===================================="
-
-            echo "===== Runtime Inventory ====="
-            cat "$RUNTIME_INVENTORY"
-            echo "============================="
-
-            BASTION_HOST=$(grep '^ansible_ssh_common_args=' "$RUNTIME_INVENTORY" | sed -n "s/.*ProxyJump=[^@]*@\\([^ ']*\\).*/\\1/p" | tr -d '\r' | head -n1)
-            TARGET_HOST=$(awk '
-              BEGIN { in_group=0 }
-              /^\\[rocky_servers\\]/ { in_group=1; next }
-              /^\\[/ && $0 !~ /^\\[rocky_servers\\]/ { in_group=0 }
-              in_group && $0 !~ /^#/ && NF {
-                for (i=1; i<=NF; i++) {
-                  if ($i ~ /^ansible_host=/) {
-                    split($i, a, "=")
-                    gsub("\\r", "", a[2])
-                    print a[2]
-                    exit
-                  }
-                }
-              }
-            ' "$RUNTIME_INVENTORY")
-
-            echo "===== Direct SSH test via ProxyJump ====="
-            echo "BASTION_HOST=$BASTION_HOST"
-            echo "TARGET_HOST=$TARGET_HOST"
-
-            if [ -n "$BASTION_HOST" ] && [ -n "$TARGET_HOST" ]; then
-              ssh -vvv \
-                -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
-                -o StrictHostKeyChecking=yes \
-                -J "${SSH_USER}@${BASTION_HOST}" \
-                "${SSH_USER}@${TARGET_HOST}" "hostname" || true
-            else
-              echo "Skip direct SSH test: bastion or target host not found in inventory"
-            fi
-
-            echo "=========================================="
-
-            echo "===== Ansible Ping ====="
-            ANSIBLE_HOST_KEY_CHECKING=False ansible all -i "$RUNTIME_INVENTORY" -m ping -vvvv
+            ANSIBLE_HOST_KEY_CHECKING=False ansible all -i "$RUNTIME_INVENTORY" -m ping
           '''
         }
       }
@@ -271,7 +221,7 @@ pipeline {
           sh '''
             set -e
             ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$RUNTIME_INVENTORY" "$PLAYBOOK_PATH" \
-              -e "run_mode=${RUN_MODE}" | tee "${COLLECTED_LOGS_DIR}/ansible_run.log"
+              -e "run_mode=${RUN_MODE}"
           '''
         }
       }
@@ -280,7 +230,7 @@ pipeline {
 
   post {
     always {
-      archiveArtifacts artifacts: 'generated/**, collected_logs/**', allowEmptyArchive: true
+      archiveArtifacts artifacts: 'generated/**, logs/**', allowEmptyArchive: true
       echo '🧹 Pipeline finished'
     }
     success {
