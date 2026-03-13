@@ -92,16 +92,16 @@ pipeline {
         script {
           if (params.INVENTORY_MODE == 'uploaded_inventory') {
             if (!params.INVENTORY_CREDENTIALS_ID?.trim()) {
-              error("uploaded_inventory 모드에서는 INVENTORY_CREDENTIALS_ID 필수")
+              error('uploaded_inventory 모드에서는 INVENTORY_CREDENTIALS_ID 필수')
             }
           }
 
           if (params.INVENTORY_MODE == 'manual') {
             if (!params.BASTION_HOST?.trim()) {
-              error("manual 모드에서는 BASTION_HOST 필수")
+              error('manual 모드에서는 BASTION_HOST 필수')
             }
             if (!params.TARGET_HOSTS?.trim()) {
-              error("manual 모드에서는 TARGET_HOSTS 필수 (줄바꿈으로 여러 개 입력)")
+              error('manual 모드에서는 TARGET_HOSTS 필수 (줄바꿈으로 여러 개 입력)')
             }
           }
         }
@@ -111,10 +111,14 @@ pipeline {
     stage('Prepare Workspace') {
       steps {
         sh '''
-          set -e
+          set -eux
           mkdir -p "$GENERATED_DIR"
           mkdir -p "$LOGS_DIR"
+          rm -f "$RUNTIME_INVENTORY"
           echo "Workspace prepared"
+          ls -ld .
+          ls -ld "$GENERATED_DIR"
+          ls -ld "$LOGS_DIR"
         '''
       }
     }
@@ -125,10 +129,21 @@ pipeline {
           if (params.INVENTORY_MODE == 'uploaded_inventory') {
             withCredentials([file(credentialsId: params.INVENTORY_CREDENTIALS_ID, variable: 'SRC_INVENTORY')]) {
               sh '''
-                set -e
-                cp "$SRC_INVENTORY" "$RUNTIME_INVENTORY"
+                set -eux
+                whoami
+                pwd
+
+                printf 'SRC_INVENTORY=[%s]\n' "$SRC_INVENTORY"
+                printf 'RUNTIME_INVENTORY=[%s]\n' "$RUNTIME_INVENTORY"
+
+                ls -ld "$GENERATED_DIR"
+                ls -l "$SRC_INVENTORY"
+
+                install -m 600 "$SRC_INVENTORY" "$RUNTIME_INVENTORY"
                 sed -i 's/\r$//' "$RUNTIME_INVENTORY"
+
                 echo "uploaded inventory copied to $RUNTIME_INVENTORY"
+                ls -l "$RUNTIME_INVENTORY"
               '''
             }
           } else {
@@ -142,8 +157,7 @@ pipeline {
             lines << "[rocky_servers]"
             targets.eachWithIndex { ip, idx ->
               def name = String.format("rocky%02d", idx + 1)
-              lines << "${name} ansible_host=${ip} ansible_user=${params.SSH_USER} " +
-                      "ansible_ssh_common_args='-o ProxyJump=${params.SSH_USER}@${bastionHost} -o StrictHostKeyChecking=no'"
+              lines << "${name} ansible_host=${ip} ansible_user=${params.SSH_USER} ansible_ssh_common_args='-o ProxyJump=${params.SSH_USER}@${bastionHost} -o StrictHostKeyChecking=no'"
             }
             lines << ""
             lines << "[rocky_servers:vars]"
@@ -160,6 +174,7 @@ pipeline {
     stage('Show Inventory (sanity check)') {
       steps {
         sh '''
+          set -eux
           echo "===== Runtime Inventory ====="
           cat "$RUNTIME_INVENTORY"
           echo "============================="
@@ -169,14 +184,17 @@ pipeline {
 
     stage('Ansible Version Check') {
       steps {
-        sh 'ansible --version'
+        sh '''
+          set -eux
+          ansible --version
+        '''
       }
     }
 
     stage('Prepare SSH known_hosts') {
       steps {
         sh '''
-          set -e
+          set -eux
 
           mkdir -p /var/lib/jenkins/.ssh
           chmod 700 /var/lib/jenkins/.ssh
@@ -187,7 +205,7 @@ pipeline {
           grep '^ansible_ssh_common_args=' "$RUNTIME_INVENTORY" \
             | sed -n "s/.*ProxyJump=[^@]*@\\([^ ']*\\).*/\\1/p" \
             | tr -d '\r' \
-            | sort -u > /tmp/bastion_hosts.txt
+            | sort -u > /tmp/bastion_hosts.txt || true
 
           echo "===== Parsed bastion hosts ====="
           cat /tmp/bastion_hosts.txt || true
@@ -208,7 +226,7 @@ pipeline {
       steps {
         sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
           sh '''
-            set -e
+            set -eux
             ANSIBLE_HOST_KEY_CHECKING=False ansible all -i "$RUNTIME_INVENTORY" -m ping
           '''
         }
@@ -219,7 +237,7 @@ pipeline {
       steps {
         sshagent(credentials: [params.SSH_CREDENTIALS_ID]) {
           sh '''
-            set -e
+            set -eux
             ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$RUNTIME_INVENTORY" "$PLAYBOOK_PATH" \
               -e "run_mode=${RUN_MODE}"
           '''
@@ -231,13 +249,13 @@ pipeline {
   post {
     always {
       archiveArtifacts artifacts: 'generated/**, logs/**', allowEmptyArchive: true
-      echo '🧹 Pipeline finished'
+      echo 'Pipeline finished'
     }
     success {
-      echo '✅ Pipeline SUCCESS'
+      echo 'Pipeline SUCCESS'
     }
     failure {
-      echo '❌ Pipeline FAILED'
+      echo 'Pipeline FAILED'
     }
   }
 }
