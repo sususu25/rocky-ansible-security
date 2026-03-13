@@ -40,7 +40,7 @@ pipeline {
 
     string(
       name: 'ANSIBLE_BRANCH',
-      defaultValue: 'feature/simple-execution',
+      defaultValue: 'main',
       description: '체크아웃할 Ansible 레포 브랜치 (Job 설정 브랜치와 달라도 이 값 우선)'
     )
 
