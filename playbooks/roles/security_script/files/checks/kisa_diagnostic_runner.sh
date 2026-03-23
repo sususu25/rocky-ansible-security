@@ -58,7 +58,12 @@ HOST_SHORT="$(hostname 2>/dev/null | awk -F. '{print $1}')"
 REPORT_FILE="$WORKDIR/$HOST_SHORT/$HOST_SHORT.txt"
 
 if [ ! -f "$REPORT_FILE" ]; then
-  REPORT_FILE="$(find "$WORKDIR" -maxdepth 3 -type f -name '*.txt' | head -n 1)"
+  REPORT_FILE="$(find "$WORKDIR" -maxdepth 3 -type f | grep -E '/[^/]+/[^/]+\.txt$' | grep -v '/Script/' | head -n 1)"
+fi
+
+if [ -z "${REPORT_FILE:-}" ] || [ ! -f "$REPORT_FILE" ]; then
+  echo "[LEGACY-CHECK][ERROR] consolidated report file not found under $WORKDIR"
+  exit 1
 fi
 
 if [ -z "${REPORT_FILE:-}" ] || [ ! -f "$REPORT_FILE" ]; then
