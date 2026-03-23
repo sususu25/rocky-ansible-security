@@ -1,5 +1,3 @@
-# playbooks/roles/security_script/tasks/main.yml
-
 - name: Precheck | sudo works non-interactively
   become: yes
   command: sudo -n true
@@ -8,10 +6,18 @@
 - name: Set log path facts
   set_fact:
     run_ts: "{{ lookup('pipe','date +%Y%m%d_%H%M%S') }}"
+    remote_base_dir: "/opt/security"
+    remote_fixes_dir: "/opt/security/fixes"
+    remote_checks_dir: "/opt/security/checks"
     remote_log_dir: "/opt/security/logs/{{ inventory_hostname }}"
     remote_raw_log: "/opt/security/logs/{{ inventory_hostname }}/{{ inventory_hostname }}_{{ lookup('pipe','date +%Y%m%d_%H%M%S') }}_raw.log"
     remote_latest_summary_log: "/opt/security/logs/{{ inventory_hostname }}/{{ inventory_hostname }}_last_summary.log"
     local_logs_dir: "{{ (playbook_dir | dirname) }}/logs"
+    current_run_mode: "{{ run_mode | default('fix') }}"
+
+- name: Set selected script directory by mode
+  set_fact:
+    selected_script_dir: "{{ remote_checks_dir if current_run_mode == 'check' else remote_fixes_dir }}"
 
 - name: Ensure remote and local log directories exist
   become: yes
@@ -20,7 +26,8 @@
     state: directory
     mode: "0755"
   loop:
-    - /opt/security/fixes
+    - "{{ remote_fixes_dir }}"
+    - "{{ remote_checks_dir }}"
     - "{{ remote_log_dir }}"
 
 - name: Ensure local logs directory exists
@@ -35,7 +42,14 @@
   become: yes
   copy:
     src: fixes/
-    dest: /opt/security/fixes/
+    dest: "{{ remote_fixes_dir }}/"
+    mode: "0755"
+
+- name: Copy checks directory
+  become: yes
+  copy:
+    src: checks/
+    dest: "{{ remote_checks_dir }}/"
     mode: "0755"
 
 - name: Init remote raw log header
@@ -44,33 +58,40 @@
     {
       echo "[{{ lookup('pipe','date -u +%Y-%m-%dT%H:%M:%SZ') }}] ===== Ansible security run start ====="
       echo "Host={{ inventory_hostname }}"
-      echo "RunMode={{ run_mode | default('fix') }}"
+      echo "RunMode={{ current_run_mode }}"
+      echo "ScriptDir={{ selected_script_dir }}"
       echo ""
     } > "{{ remote_raw_log }}"
   args:
     executable: /bin/bash
   changed_when: false
 
-- name: Find fix scripts (U-*.sh)
+- name: Find scripts (U-*.sh) for selected mode
   become: yes
   find:
-    paths: /opt/security/fixes
+    paths: "{{ selected_script_dir }}"
     patterns: "U-*.sh"
     file_type: file
-  register: fix_scripts
+  register: selected_scripts
 
-- name: Build sorted fix list
+- name: Build sorted script list
   set_fact:
-    fix_list: "{{ fix_scripts.files | map(attribute='path') | sort }}"
+    script_list: "{{ selected_scripts.files | map(attribute='path') | sort }}"
+
+- name: Fail early when no scripts exist for selected mode
+  fail:
+    msg: "No scripts found in {{ selected_script_dir }} for run_mode={{ current_run_mode }}"
+  when: script_list | length == 0
 
 - name: Init result containers
   set_fact:
     ok_list: []
     manual_list: []
     fail_list: []
+    vuln_list: []
     manual_blocks: []
 
-- name: Run each fix script sequentially (do not stop on failure)
+- name: Run each script sequentially (do not stop on failure)
   become: yes
   shell: |
     set -o pipefail
@@ -81,12 +102,24 @@
     bash "${script}" >> "{{ remote_raw_log }}" 2>&1
     rc=$?
 
-    if [ "$rc" -eq 0 ]; then
-      echo "✅ [{{ inventory_hostname }}] OK   ${base} (rc=${rc})" >> "{{ remote_raw_log }}"
-    elif [ "$rc" -eq 2 ]; then
-      echo "⚠️ [{{ inventory_hostname }}] MANUAL ${base} (rc=${rc})" >> "{{ remote_raw_log }}"
+    if [ "{{ current_run_mode }}" = "check" ]; then
+      if [ "$rc" -eq 0 ]; then
+        echo "✅ [{{ inventory_hostname }}] PASS   ${base} (rc=${rc})" >> "{{ remote_raw_log }}"
+      elif [ "$rc" -eq 2 ]; then
+        echo "⚠️ [{{ inventory_hostname }}] MANUAL ${base} (rc=${rc})" >> "{{ remote_raw_log }}"
+      elif [ "$rc" -eq 3 ]; then
+        echo "🔎 [{{ inventory_hostname }}] VULN  ${base} (rc=${rc})" >> "{{ remote_raw_log }}"
+      else
+        echo "❌ [{{ inventory_hostname }}] ERROR ${base} (rc=${rc})" >> "{{ remote_raw_log }}"
+      fi
     else
-      echo "❌ [{{ inventory_hostname }}] FAIL ${base} (rc=${rc})" >> "{{ remote_raw_log }}"
+      if [ "$rc" -eq 0 ]; then
+        echo "✅ [{{ inventory_hostname }}] OK    ${base} (rc=${rc})" >> "{{ remote_raw_log }}"
+      elif [ "$rc" -eq 2 ]; then
+        echo "⚠️ [{{ inventory_hostname }}] MANUAL ${base} (rc=${rc})" >> "{{ remote_raw_log }}"
+      else
+        echo "❌ [{{ inventory_hostname }}] FAIL  ${base} (rc=${rc})" >> "{{ remote_raw_log }}"
+      fi
     fi
 
     echo "■ [{{ inventory_hostname }}] END ${base} rc=${rc}" >> "{{ remote_raw_log }}"
@@ -94,14 +127,14 @@
     exit $rc
   args:
     executable: /bin/bash
-  loop: "{{ fix_list }}"
+  loop: "{{ script_list }}"
   loop_control:
     label: "{{ item | basename }}"
   register: run_results
   ignore_errors: true
   failed_when: false
 
-- name: Classify results (OK)
+- name: Classify results (OK/PASS)
   set_fact:
     ok_list: "{{ ok_list + [item.item | basename] }}"
   loop: "{{ run_results.results }}"
@@ -113,11 +146,28 @@
   loop: "{{ run_results.results }}"
   when: (item.rc | default(1)) == 2
 
-- name: Classify results (FAIL)
+- name: Classify results (VULN in check mode)
+  set_fact:
+    vuln_list: "{{ vuln_list + [item.item | basename] }}"
+  loop: "{{ run_results.results }}"
+  when:
+    - current_run_mode == 'check'
+    - (item.rc | default(1)) == 3
+
+- name: Classify results (FAIL/ERROR)
   set_fact:
     fail_list: "{{ fail_list + [item.item | basename] }}"
   loop: "{{ run_results.results }}"
-  when: (item.rc | default(1)) not in [0, 2]
+  when: >
+    (
+      current_run_mode == 'check'
+      and (item.rc | default(1)) not in [0, 2, 3]
+    )
+    or
+    (
+      current_run_mode != 'check'
+      and (item.rc | default(1)) not in [0, 2]
+    )
 
 - name: Build MANUAL ACTION blocks
   set_fact:
@@ -159,21 +209,23 @@
 
 - name: Compute result counts
   set_fact:
-    total_count: "{{ fix_list | length }}"
+    total_count: "{{ script_list | length }}"
     ok_count: "{{ ok_list | length }}"
     manual_count: "{{ manual_list | length }}"
+    vuln_count: "{{ vuln_list | length }}"
     fail_count: "{{ fail_list | length }}"
 
 - name: Build summary text
   set_fact:
     summary_text: |
       [SUMMARY] Host={{ inventory_hostname }}
-      - run_mode: {{ run_mode | default('fix') }}
+      - run_mode: {{ current_run_mode }}
       - executed_at: {{ run_ts }}
       - total: {{ total_count }}
-      - ok(✅): {{ ok_count }}
+      - ok/pass(✅): {{ ok_count }}
       - manual(⚠️): {{ manual_count }}
-      - fail(❌): {{ fail_count }}
+      - vuln(🔎): {{ vuln_count if current_run_mode == 'check' else 'n/a' }}
+      - fail/error(❌): {{ fail_count }}
       - remote_raw_log: {{ remote_raw_log }}
       - remote_latest_summary: {{ remote_latest_summary_log }}
 
@@ -184,6 +236,19 @@
       {% endfor %}
       {% else %}
       - none
+      {% endif %}
+
+      [VULN LIST]
+      {% if current_run_mode == 'check' %}
+      {% if vuln_list | length > 0 %}
+      {% for item in vuln_list %}
+      - {{ item }}
+      {% endfor %}
+      {% else %}
+      - none
+      {% endif %}
+      {% else %}
+      - n/a
       {% endif %}
 
       [FAIL LIST]
@@ -230,5 +295,5 @@
 
 - name: Fail play at end when failures exist
   fail:
-    msg: "Security run has FAIL items: {{ fail_list }}"
+    msg: "Security run has FAIL/ERROR items: {{ fail_list }}"
   when: fail_count | int > 0
