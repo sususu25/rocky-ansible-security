@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # kisa_diagnostic_runner.sh
-# Run KISA-style diagnostic script safely, parse consolidated report,
-# and emit ONLY current fix-script numbering/title.
+# Final fix-aligned runner
 # rc: 0=PASS, 2=MANUAL, 3=VULN, 1=ERROR
 
 set -u
@@ -17,7 +16,7 @@ if [ ! -f "$DIAG_SCRIPT" ]; then
   exit 1
 fi
 
-for cmd in awk grep find hostname mktemp cp chmod; do
+for cmd in awk grep find hostname mktemp cp chmod sed sort; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "[DIAG-RUNNER][ERROR] required command not found: $cmd"
     exit 1
@@ -41,7 +40,7 @@ bash ./diagnostic.sh >/tmp/kisa_diagnostic_runner.stdout 2>/tmp/kisa_diagnostic_
 legacy_rc=$?
 popd >/dev/null || exit 1
 
-if [ $legacy_rc -ne 0 ]; then
+if [ "$legacy_rc" -ne 0 ]; then
   echo "[DIAG-RUNNER][ERROR] diagnostic script exited with rc=$legacy_rc"
   [ -s /tmp/kisa_diagnostic_runner.stderr ] && sed 's/^/[DIAG-STDERR] /' /tmp/kisa_diagnostic_runner.stderr
   exit 1
@@ -65,7 +64,7 @@ PARSED_OUT="$TMPDIR_ROOT/parsed.out"
 
 awk '
 function trim(s) { sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s }
-function classify(text,   status, detail) {
+function normalize_status(text,   status, detail) {
   status = "PASS"
   detail = "판정 문구를 찾지 못함"
 
@@ -80,96 +79,98 @@ function classify(text,   status, detail) {
     status = "PASS"
     detail = "양호 판정 문구 발견"
   }
-  if (text ~ />[^\n]*취약|취약함|취약$/) {
-    status = "VULN"
-    detail = "취약 판정 문구 발견"
-  }
   return status "|" detail
 }
-function map_fix(title, legacy,   t) {
-  t = title
-
-  if (t ~ /root 계정 원격 접속 제한/) return "U-01|root 원격 로그인 제한"
-  if (t ~ /패스워드 복잡도 설정/) return "U-02|패스워드 정책 강화"
-  if (t ~ /계정잠금 임계값/) return "U-03|계정 잠금 정책"
-  if (t ~ /패스워드 파일 보호/) return "U-04|/etc/passwd, shadow 적용 확인"
-  if (t ~ /root이외의 UID가.*0.*금지/) return "U-05|root 외 UID 0 금지"
-  if (t ~ /root계정 su제한/) return "U-06|su / wheel 설정"
-  if (t ~ /불필요한 계정 제거/) return "U-07|불필요 사용자 계정"
-  if (t ~ /관리자 그룹에 최소한의 계정 포함/) return "U-08|root 그룹 사용자"
-  if (t ~ /계정이 존재하지 않는 GID금지/) return "U-09|불필요 그룹"
-  if (t ~ /동일한 UID 금지/) return "U-10|UID 중복"
-  if (t ~ /사용자 shell 점검/) return "U-11|로그인 불필요 계정 쉘 제한"
-  if (t ~ /Session Timeout설정/) return "U-12|세션 자동 로그아웃 + 기본 umask"
-  if (t ~ /Root 홈, 패스 디렉터리 권한 및 패스 설정/) return "U-14|PATH 환경변수 안전 설정"
-  if (t ~ /파일 및 디렉터리 소유자 설정/) return "U-15|소유자/그룹 없는 파일"
-  if (t ~ /\/etc\/passwd 파일 소유자 및 권한 설정/) return "U-16|/etc/passwd"
-  if (t ~ /\/etc\/shadow 파일 소유자 및 권한 설정/) return "U-18|/etc/shadow"
-  if (t ~ /\/etc\/hosts 파일 소유자 및 권한 설정/) return "U-19|/etc/hosts"
-  if (t ~ /\/etc\/\(x\)inetd\.conf 파일 소유자 및 권한 설정/) return "U-20|inetd/xinetd/systemd 설정 파일"
-  if (t ~ /\/etc\/syslog\.conf 파일 소유자 및 권한 설정/) return "U-21|syslog/rsyslog 설정 파일"
-  if (t ~ /\/etc\/services 파일 소유자 및 권한 설정/) return "U-22|/etc/services"
-  if (t ~ /SUID, SGID, Sticky bit 설정 파일 점검/) return "U-23|SUID/SGID 설정 파일"
-  if (t ~ /사용자, 시스템 시작파일 및 환경파일 소유자 및 권한 설정/) return "U-24|홈 디렉터리 환경변수 파일"
-  if (t ~ /world writable 파일 점검/) return "U-25|others 쓰기 권한 파일"
-  if (t ~ /\/dev에 존재하지 않는 device 파일 점검/) return "U-26|/dev 내 불필요 파일"
-  if (t ~ /\.rhosts|hosts\.equiv 사용 금지/) return "U-27|hosts.equiv / .rhosts"
-  if (t ~ /접속 ip 및 포트 제한/) return "U-28|접근 통제 설정"
-  if (t ~ /hosts\.lpd파일 소유자 및 권한설정/) return "U-29|/etc/hosts.lpd"
-  if (t ~ /UMASK 설정 관리/) return "U-30|UMASK"
-  if (t ~ /홈 디렉터리 소유자 및 권한 설정/) return "U-31|사용자 홈 디렉터리 권한"
-  if (t ~ /홈 디렉터리로 지정한 디렉터리의 존재 관리/) return "U-32|홈 디렉터리 미존재 계정"
-  if (t ~ /숨겨진 파일 및 디렉터리 검색 및 제거/) return "U-33|불필요 숨김 파일/디렉터리"
-  if (t ~ /Finger서비스 비활성화/) return "U-34|Finger 비활성화"
-  if (t ~ /Anonymous FTP 비활성화/) return "U-35|익명 FTP/NFS/Samba 접근 비활성화"
-  if (t ~ /r 계열 서비스 비활성화/) return "U-36|r 계열 서비스 비활성화"
-  if (t ~ /cron 파일 소유자 및 권한 설정/) return "U-37|crontab/cron/at 권한"
-  if (t ~ /DOS 공격에 취약한 서비스 비활성화/) return "U-38|불필요한 네트워크 서비스 비활성화"
-  if (t ~ /NFS 서비스 비활성화/) return "U-39|불필요한 NFS 서비스/socket 비활성화"
-  if (t ~ /NFS 접근통제/) return "U-40|/etc/exports / NFS 공유 설정"
-  if (t ~ /automountd 제거/) return "U-41|automount/autofs 비활성화"
-  if (t ~ /RPC 서비스 확인/) return "U-42|불필요한 RPC 서비스"
-  if (t ~ /NIS, NIS\+ 점검/) return "U-43|NIS 관련 서비스"
-  if (t ~ /tftp, talk 서비스 비활성화/) return "U-44|TFTP / Talk / Ntalk 서비스"
-  if (t ~ /Sendmail 버전 점검/) return "U-45|메일 서비스 점검 및 비활성화"
-  if (t ~ /일반사용자의 Sendmail 실행 방지/) return "U-46|메일 서비스 보안 설정 / 일반 사용자 권한 제한"
-  if (t ~ /스팸 메일 릴레이 제한/) return "U-47|메일 서버 릴레이 제한"
-  if (t ~ /expn, vrfy 명령어 제한/) return "U-48|SMTP VRFY/EXPN 차단"
-  if (t ~ /DNS 보안 버전 패치/) return "U-49|DNS 서비스(named/BIND)"
-  if (t ~ /DNS Zone Transfer 설정/) return "U-50|DNS Zone Transfer 제한"
-  if (t ~ /SSH 원격 접속 허용/) return "U-60|SSH 원격 접속 허용"
-  if (t ~ /ftp 계정 shell 제한/) return "U-62|ftp 계정 shell 제한"
-  if (t ~ /Ftpusers 파일 소유자 및 권한 설정/) return "U-63|Ftpusers 파일 소유자 및 권한 설정"
-  if (t ~ /Ftpusers 파일 설정/) return "U-64|Ftpusers 파일 설정"
-  if (t ~ /at 서비스 권한 설정/) return "U-65|at 서비스 권한 설정"
-  if (t ~ /SNMP 서비스 구동 점검/) return "U-66|SNMP 서비스 구동 점검"
-  if (t ~ /SNMP 서비스 커뮤니티스트링의 복잡성 설정/) return "U-67|SNMP 서비스 커뮤니티스트링의 복잡성 설정"
-  if (t ~ /로그온 시 경고 메시지 제공/) return "U-68|로그온 시 경고 메시지 제공"
-  if (t ~ /NFS 설정 파일 접근 권한/) return "U-69|NFS 설정 파일 접근 권한"
-  if (t ~ /Apache서비스 정보 숨김/) return "U-71|Apache서비스 정보 숨김"
-  if (t ~ /최신 보안패치 및 벤더 권고사항 적용/) return "U-42|최신 보안패치 및 벤더 권고사항 적용"
-  if (t ~ /로그의 정기적 검토 및 보고/) return "U-43|로그의 정기적 검토 및 보고"
-  if (t ~ /정책에 따른 시스템 로깅 설정/) return "U-72|정책에 따른 시스템 로깅 설정"
-
-  return sprintf("U-%02d", substr(legacy, 3) + 0) "|" t
+function severity_rank(status) {
+  if (status == "VULN") return 3
+  if (status == "MANUAL") return 2
+  return 1
 }
-function flush_section(   mapped, result, status, detail, out_num, out_title) {
-  if (u != "") {
-    mapped = map_fix(title, u)
-    split(mapped, m, "|")
-    out_num = m[1]
-    out_title = m[2]
+function set_map(legacy, out_num, out_title) {
+  map_num[legacy] = out_num
+  map_title[legacy] = out_title
+}
+function init_maps() {
+  # fix 기준으로만 매핑. 대응 조치 스크립트가 없는 legacy 항목은 출력하지 않음.
+  set_map("U-01", "U-01", "root 원격 로그인 제한 (Telnet / SSH)")
+  set_map("U-02", "U-02", "패스워드 정책 강화")
+  set_map("U-03", "U-03", "계정 잠금 정책 설정")
+  set_map("U-04", "U-04", "/etc/passwd 및 shadow 적용 확인")
+  set_map("U-44", "U-05", "UID 0 중복 계정 점검 (root 외 UID 0 금지)")
+  set_map("U-45", "U-06", "su 명령어 권한 및 wheel 그룹 설정 (운영 계정 예외 포함)")
+  set_map("U-49", "U-07", "불필요한 사용자 계정")
+  set_map("U-50", "U-08", "root 그룹 사용자 점검")
+  set_map("U-51", "U-09", "불필요한 그룹")
+  set_map("U-52", "U-10", "사용자 UID 중복 점검")
+  set_map("U-53", "U-11", "로그인 불필요한 계정 쉘 제한")
+  set_map("U-54", "U-12", "세션 자동 로그아웃 및 기본 umask 설정")
+  set_map("U-09", "U-19", "/etc/hosts 파일 소유자 및 권한 점검")
+  set_map("U-10", "U-20", "inetd / xinetd / systemd 설정 파일 권한 점검")
+  set_map("U-11", "U-21", "syslog / rsyslog 설정 파일 권한 점검")
+  set_map("U-12", "U-22", "/etc/services 파일 소유자 및 권한 점검/조치")
+  set_map("U-13", "U-23", "SUID/SGID 설정 파일")
+  set_map("U-14", "U-24", "홈 디렉터리 환경변수 파일 소유자 및 권한 점검/조치 (최소 변경)")
+  set_map("U-15", "U-25", "일반 사용자(others) 쓰기 권한 파일 점검 및 조치")
+  set_map("U-16", "U-26", "/dev 디렉터리 내 불필요 파일")
+  set_map("U-17", "U-27", "hosts.equiv / .rhosts 신뢰 관계 설정 점검")
+  set_map("U-18", "U-28", "접근 통제 설정")
+  set_map("U-22", "U-37", "crontab, cron, at 파일 소유자 및 권한 점검/조치")
+  set_map("U-65", "U-37", "crontab, cron, at 파일 소유자 및 권한 점검/조치")
+  set_map("U-19", "U-34", "Finger 서비스 비활성화 (inetd/xinetd)")
+  set_map("U-20", "U-35", "익명 FTP/NFS/Samba 접근 비활성화")
+  set_map("U-21", "U-36", "r 계열 서비스 비활성화 (rlogin, rsh, rexec)")
+  set_map("U-23", "U-38", "불필요한 네트워크 서비스 비활성화 (echo, discard, daytime, chargen)")
+  set_map("U-24", "U-39", "불필요한 NFS 서비스 및 socket 비활성화")
+  set_map("U-25", "U-40", "/etc/exports 파일 점검 및 NFS 공유 설정 (기본: 공유 없음으로 정리)")
+  set_map("U-26", "U-41", "자동 마운트(automount/autofs) 서비스 비활성화")
+  set_map("U-27", "U-42", "불필요한 RPC 서비스 점검 및 비활성화")
+  set_map("U-28", "U-43", "NIS 관련 서비스 점검 및 비활성화")
+  set_map("U-29", "U-44", "TFTP, Talk, Ntalk 서비스 점검 및 비활성화")
+  set_map("U-30", "U-45", "메일 서비스 점검 및 비활성화")
+  set_map("U-32", "U-46", "메일 서비스 보안 설정 및 일반 사용자 권한 제한")
+  set_map("U-31", "U-47", "메일 서버 릴레이 제한 설정")
+  set_map("U-70", "U-48", "SMTP VRFY/EXPN 정보노출 차단 설정")
+  set_map("U-33", "U-49", "DNS 서비스(named/BIND) 점검 및 비활성화")
+  set_map("U-34", "U-50", "DNS Zone Transfer 제한(xfrnets, allow-transfer) 점검")
+  set_map("U-62", "U-55", "FTP 계정 로그인 제한 설정")
+  set_map("U-63", "U-56", "FTP 접근 제한 파일 소유자 및 권한 설정")
+  set_map("U-64", "U-57", "FTP root 계정 접근 제한 설정")
+  set_map("U-66", "U-58", "SNMP 서비스 비활성화")
+  set_map("U-67", "U-60", "SNMP Community String 설정 점검 (납품 기본: SNMP 미사용/비활성화)")
+  set_map("U-68", "U-62", "로그온 경고 메시지 점검 및 설정 시작")
+  set_map("U-42", "U-64", "OS 및 보안 업데이트 필요 여부 점검")
+  set_map("U-72", "U-66", "로그 기록 정책(rsyslog) 점검 및 설정 시작")
 
-    result = classify(section_text)
-    split(result, parts, "|")
-    status = parts[1]
-    detail = parts[2]
+  # legacy 비밀번호 세부 항목은 모두 fix U-02로 귀속
+  set_map("U-46", "U-02", "패스워드 정책 강화")
+  set_map("U-47", "U-02", "패스워드 정책 강화")
+  set_map("U-48", "U-02", "패스워드 정책 강화")
+}
+function flush_section(   result, parts, status, detail, out_num, out_title, rank) {
+  if (u == "") return
+  if (!(u in map_num)) return
 
-    if (!(out_num in seen)) {
-      seen[out_num] = 1
-      print "[" out_num "][" status "] " out_title " - " detail
-    }
+  out_num = map_num[u]
+  out_title = map_title[u]
+
+  result = normalize_status(section_text)
+  split(result, parts, "|")
+  status = parts[1]
+  detail = parts[2]
+  rank = severity_rank(status)
+
+  if (!(out_num in best_rank) || rank > best_rank[out_num]) {
+    best_rank[out_num] = rank
+    best_status[out_num] = status
+    best_detail[out_num] = detail
+    best_title[out_num] = out_title
   }
+}
+BEGIN {
+  init_maps()
+  u = ""
+  title = ""
+  section_text = ""
 }
 /^[- ]*U-[0-9][0-9][.]/ {
   flush_section()
@@ -189,10 +190,22 @@ function flush_section(   mapped, result, status, detail, out_num, out_title) {
 }
 END {
   flush_section()
+  for (i = 1; i <= 67; i++) {
+    key = sprintf("U-%02d", i)
+    if (key in best_status) {
+      print "[" key "][" best_status[key] "] " best_title[key] " - " best_detail[key]
+    }
+  }
 }
 ' "$REPORT_FILE" > "$PARSED_OUT"
 
 cat "$PARSED_OUT"
+
+PASS_COUNT="$(grep -c '\[PASS\]' "$PARSED_OUT" 2>/dev/null || true)"
+MANUAL_COUNT="$(grep -c '\[MANUAL\]' "$PARSED_OUT" 2>/dev/null || true)"
+VULN_COUNT="$(grep -c '\[VULN\]' "$PARSED_OUT" 2>/dev/null || true)"
+
+echo "[DIAG-SUMMARY] pass=$PASS_COUNT manual=$MANUAL_COUNT vuln=$VULN_COUNT"
 
 if grep -q '\[VULN\]' "$PARSED_OUT"; then
   exit 3
