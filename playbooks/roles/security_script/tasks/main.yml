@@ -192,6 +192,9 @@
   loop: "{{ manual_list }}"
   loop_control:
     label: "{{ item }}"
+  when:
+  - current_run_mode != 'check'
+  - manual_list | length > 0
 
 - name: Append MANUAL ACTION blocks to remote raw log
   become: yes
@@ -204,8 +207,10 @@
     EOF
   args:
     executable: /bin/bash
-  when: manual_blocks | length > 0
   changed_when: false
+  when:
+  - current_run_mode != 'check'
+  - manual_blocks | length > 0
 
 - name: Compute result counts
   set_fact:
